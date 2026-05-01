@@ -5,8 +5,9 @@ from datetime import datetime
 import warnings
 
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="投資決策雷達", layout="wide")
+st.set_page_config(page_title="專業設備股雷達", layout="wide")
 
+# 中文名稱字典
 CHINESE_NAMES = {
     '2330': '台積電', '3260': '威剛', '1802': '台玻', '2345': '智邦',
     '2454': '聯發科', '3711': '日月光', '3189': '景碩', '8028': '昇陽半',
@@ -17,71 +18,90 @@ CHINESE_NAMES = {
 
 TRACKING_LIST = ['2454', '3711', '3189', '8028', '3661', '4576', '6285', '8064', '2345', '3028', '6147', '3289', '6830', '3163', '3587', '3066']
 
-def get_advice(rsi, m_val, m_prev, price, upper, lower):
-    """綜合評估買賣建議"""
-    if rsi < 35 and m_val > m_prev: return "🔥 超跌反彈 (分批布局)"
-    if price <= lower: return "🟢 觸及布林下軌 (支撐測試)"
-    if rsi > 75: return "⚠️ 極度過熱 (不宜追高)"
-    if price >= upper: return "🍎 觸及布林上軌 (壓力區)"
-    if m_val > 0 and m_val > m_prev: return "📈 多頭攻擊 (偏多看)"
-    return "⚪ 震盪整理"
+def get_analysis_data(code):
+    """抓取單一股票的量化與財報數據"""
+    for suffix in ['.TW', '.TWO']:
+        t = yf.Ticker(f"{code}{suffix}")
+        h = t.history(period="6mo")
+        if not h.empty:
+            try:
+                info = t.info
+                p = round(h['Close'].iloc[-1], 2)
+                # RSI 計算
+                delta = h['Close'].diff()
+                gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
+                loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
+                rsi = round(100 - (100 / (1 + (gain/loss))), 2) if loss != 0 else 100
+                # 布林與均線
+                ma20 = h['Close'].rolling(20).mean()
+                std20 = h['Close'].rolling(20).std()
+                upper = ma20.iloc[-1] + 2 * std20.iloc[-1]
+                lower = ma20.iloc[-1] - 2 * std20.iloc[-1]
+                # MACD
+                e1 = h['Close'].ewm(span=12, adjust=False).mean()
+                e2 = h['Close'].ewm(span=26, adjust=False).mean()
+                m = e1 - e2
+                s = m.ewm(span=9, adjust=False).mean()
+                m_v, m_p = (m-s).iloc[-1], (m-s).iloc[-2]
+                
+                # 建議邏輯
+                advice = "⚪ 震盪整理"
+                if rsi < 35 and m_v > m_p: advice = "🔥 超跌反彈"
+                elif p <= lower: advice = "🟢 觸及下軌"
+                elif rsi > 75: advice = "⚠️ 極度過熱"
+                elif p >= upper: advice = "🍎 觸及上軌壓力"
+                elif m_v > 0 and m_v > m_p: advice = "📈 多頭攻擊"
 
-st.title("🛡️ 17 檔核心持股決策雷達")
+                return {
+                    "名稱": CHINESE_NAMES.get(code, info.get('shortName', code)),
+                    "代號": code, "現價": p, "RSI": rsi, 
+                    "P/E": info.get('trailingPE', 'N/A'),
+                    "毛利": f"{round(info.get('grossMargins', 0)*100, 2)}%",
+                    "營收年增": f"{round(info.get('revenueGrowth', 0)*100, 2)}%",
+                    "決策建議": advice
+                }
+            except: pass
+    return None
 
-if st.button("🔄 執行全數據掃描"):
-    all_data = []
-    with st.spinner("正在進行深度量化運算..."):
-        for code in TRACKING_LIST:
-            for suffix in ['.TW', '.TWO']:
-                t = yf.Ticker(f"{code}{suffix}")
-                h = t.history(period="6mo")
-                if not h.empty:
-                    try:
-                        info = t.info
-                        p = round(h['Close'].iloc[-1], 2)
-                        
-                        # 技術指標：RSI
-                        delta = h['Close'].diff()
-                        gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
-                        loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
-                        rsi = round(100 - (100 / (1 + (gain/loss))), 2) if loss != 0 else 100
-                        
-                        # 技術指標：布林通道
-                        ma20 = h['Close'].rolling(20).mean()
-                        std20 = h['Close'].rolling(20).std()
-                        upper = ma20.iloc[-1] + 2 * std20.iloc[-1]
-                        lower = ma20.iloc[-1] - 2 * std20.iloc[-1]
-                        
-                        # 技術指標：MACD
-                        e1 = h['Close'].ewm(span=12, adjust=False).mean()
-                        e2 = h['Close'].ewm(span=26, adjust=False).mean()
-                        m = e1 - e2
-                        s = m.ewm(span=9, adjust=False).mean()
-                        m_v, m_p = (m-s).iloc[-1], (m-s).iloc[-2]
+st.title("🛡️ 17 檔核心清單與個股健檢")
 
-                        all_data.append({
-                            "名稱": CHINESE_NAMES.get(code, code), "現價": p,
-                            "RSI": rsi, "P/E": info.get('trailingPE', 'N/A'), "P/B": info.get('priceToBook', 'N/A'),
-                            "毛利": f"{round(info.get('grossMargins', 0)*100, 2)}%",
-                            "決策建議": get_advice(rsi, m_v, m_p, p, upper, lower)
-                        })
-                    except: pass
-                    break
-    st.dataframe(pd.DataFrame(all_data), use_container_width=True)
+# --- 第一區：17 檔追蹤清單 ---
+st.subheader("📋 每日追蹤清單大閱兵")
+if st.button("🔄 立即更新追蹤數據"):
+    tracking_data = []
+    with st.spinner("正在掃描核心名單..."):
+        for c in TRACKING_LIST:
+            res = get_analysis_data(c)
+            if res: tracking_data.append(res)
+    st.dataframe(pd.DataFrame(tracking_data), use_container_width=True)
 
 st.divider()
 
-with st.expander("📖 投資決策指標與 K 線白話解析"):
+# --- 第二區：自定義手動查詢 ---
+st.subheader("🔍 個股手動查詢健檢")
+user_input = st.text_input("👉 請輸入代號 (例如: 2330, 3260, 1802)", "")
+if user_input:
+    custom_data = []
+    codes = [c.strip() for c in user_input.split(',')]
+    with st.spinner("查詢中..."):
+        for c in codes:
+            res = get_analysis_data(c)
+            if res: custom_data.append(res)
+            else: st.error(f"找不到代號 {c}")
+    if custom_data:
+        st.dataframe(pd.DataFrame(custom_data), use_container_width=True)
+
+# --- 決策指南 ---
+with st.expander("📖 投資決策與 K 線指標白話解析"):
     st.markdown("""
     ### 1. K 線的靈魂：開高低收
-    *   **紅棒 (陽線)**：收盤高於開盤。代表多頭（買方）獲勝，氣勢轉強。
-    *   **長下影線**：股價曾重摔但被打撈上來。這通常是「止跌」或「測支撐」的訊號。
+    *   **紅棒**：當天買盤強勁，收盤價高於開盤價。
+    *   **長下影線**：股價曾重挫但被強力拉回，通常代表底部支撐強勁。
 
-    ### 2. 買點判斷：如何評估「要買了」？
-    *   **RSI < 30 (超賣區)**：就像彈簧被壓到極限，隨時會強烈反彈。
-    *   **布林下軌 (支撐線)**：股價跌到這裡通常會有護盤力道，適合分批布局。
-    *   **MACD 綠柱縮小**：代表賣壓吐完了，動能準備轉正。
+    ### 2. 量化指標：什麼時候「該買了」？
+    *   **RSI (14)**：低於 35 代表極度超跌，若此時 MACD 綠柱縮短（出現 🟢反彈 訊號），就是極佳買點。
+    *   **布林下軌**：股價觸及下軌代表短期跌幅已深，容易出現技術性反彈。
 
-    ### 3. 安全邊際：財報輔助
-    *   **P/E < 15 & 毛利 > 30%**：這代表公司有賺錢能力且股價不貴，買起來心裡比較踏實。
+    ### 3. 基本面安全邊際
+    *   **毛利與營收**：毛利率越高代表產品越難取代；營收年增率大於 0 代表公司還在成長軌道上。
     """)
