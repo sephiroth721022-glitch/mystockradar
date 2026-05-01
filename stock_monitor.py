@@ -1,150 +1,118 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import plotly.graph_objects as go
 from datetime import datetime
 import warnings
 
-# 忽略警告
 warnings.filterwarnings('ignore')
 
-# 網頁配置：設定寬版面模式
-st.set_page_config(page_title="半導體設備雷達", layout="wide")
+# 網頁配置
+st.set_page_config(page_title="專業股市分析雷達", layout="wide")
 
-# 中文翻譯字典
+# 💡 擴充中文名稱字典 (加入你新增的追蹤清單)
 CHINESE_NAMES = {
-    '3131': '弘塑', '3583': '辛耘', '6187': '萬潤', '1560': '中砂',
-    '3680': '家登', '3413': '京鼎', '2404': '漢唐', '6196': '帆宣',
-    '6640': '均華', '6667': '信紘科', '6515': '穎崴', '3402': '漢科',
-    '2330': '台積電', '3260': '威剛', '1802': '台玻', '2345': '智邦'
+    '2330': '台積電', '3260': '威剛', '1802': '台玻', '2345': '智邦',
+    '2454': '聯發科', '3711': '日月光投控', '3189': '景碩', '8028': '昇陽半',
+    '3661': '世芯-KY', '4576': '大銀微', '6285': '啟碁', '8064': '東捷',
+    '3028': '增你強', '6147': '紘康', '3289': '宜特', '6830': '汎銓',
+    '3163': '波若威', '3587': '閎康', '3066': '珍寶', '6515': '穎崴'
 }
 
-# 設備股觀測池
-EQUIPMENT_POOL = ['3131', '3583', '6187', '1560', '3680', '3413', '2404', '6196', '6640', '6667', '6515', '3402']
+# 你的每日追蹤名單
+TRACKING_LIST = [
+    '2454', '3711', '3189', '8028', '3661', '4576', '6285', '8064', 
+    '2345', '3028', '6147', '3289', '6830', '3163', '3587', '3066'
+]
 
 def format_pct(val):
     if pd.isna(val) or val is None: return 'N/A'
     return f"{round(val * 100, 2)}%"
 
-st.title("🚀 半導體設備股雷達與全方位健檢")
+st.title("📈 專業股市 K 線與全方位健檢系統")
 
-# --- 自動掃描反彈功能 ---
-st.subheader("🎯 設備股：今日準備反彈 TOP 5 嚴選")
-if st.button("啟動雷達掃描 🔍"):
-    candidates = []
-    with st.spinner("正在掃描設備股動能..."):
-        for code in EQUIPMENT_POOL:
-            # 自動偵測上市(.TW)或上櫃(.TWO)
-            for suffix in ['.TW', '.TWO']:
-                ticker = f"{code}{suffix}"
-                stock = yf.Ticker(ticker)
-                hist = stock.history(period="6mo")
-                if not hist.empty:
-                    try:
-                        name = CHINESE_NAMES.get(code, code)
-                        last_price = round(hist['Close'].iloc[-1], 2)
-                        
-                        # 計算 RSI
-                        delta = hist['Close'].diff()
-                        gain = delta.where(delta > 0, 0).rolling(window=14).mean().iloc[-1]
-                        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean().iloc[-1]
-                        rs = gain / loss if loss != 0 else 0
-                        rsi = round(100 - (100 / (1 + rs)), 2)
-                        
-                        # 計算 MACD
-                        exp1 = hist['Close'].ewm(span=12, adjust=False).mean()
-                        exp2 = hist['Close'].ewm(span=26, adjust=False).mean()
-                        macd = exp1 - exp2
-                        signal = macd.ewm(span=9, adjust=False).mean()
-                        hist_macd = (macd - signal).iloc[-1]
-                        hist_macd_prev = (macd - signal).iloc[-2]
-                        
-                        # 判定反彈條件 (綠柱縮小)
-                        if hist_macd < 0 and hist_macd > hist_macd_prev:
-                            candidates.append({
-                                "代號": code, "名稱": name, "收盤價": last_price, 
-                                "RSI": rsi, "動能狀態": "🟢綠柱縮小(醞釀反彈)"
-                            })
-                    except Exception:
-                        pass
-                    break
-        
-        if candidates:
-            # 依 RSI 由低到高排序，顯示最超跌的前五名
-            res_df = pd.DataFrame(sorted(candidates, key=lambda x: x['RSI'])[:5])
-            st.dataframe(res_df, use_container_width=True)
-        else:
-            st.info("目前設備股中尚無符合「殺盤衰竭」條件的標的。")
+# --- 側邊欄：每日追蹤清單快報 ---
+st.sidebar.header("📋 每日追蹤快報")
+if st.sidebar.button("刷新追蹤名單"):
+    t_data = []
+    for code in TRACKING_LIST:
+        for suffix in ['.TW', '.TWO']:
+            t = yf.Ticker(f"{code}{suffix}")
+            h = t.history(period="2d")
+            if not h.empty:
+                name = CHINESE_NAMES.get(code, code)
+                price = round(h['Close'].iloc[-1], 2)
+                change = round(h['Close'].iloc[-1] - h['Close'].iloc[-2], 2)
+                t_data.append({"代號": code, "名稱": name, "現價": price, "漲跌": change})
+                break
+    st.sidebar.table(pd.DataFrame(t_data))
 
-st.divider()
+# --- 主畫面：個股深度健檢與 K 線圖 ---
+st.subheader("🔍 個股深度健檢與技術圖表")
+target_code = st.text_input("請輸入單一股票代號查看 K 線圖 (例如: 3260)", "3260")
 
-# --- 手動查詢功能 ---
-st.subheader("🔍 個股全方位深度健檢")
-user_codes = st.text_input("👉 請輸入股票代號 (用逗號隔開，例如: 2330, 3260, 6515)", "")
+if target_code:
+    valid = False
+    for suffix in ['.TW', '.TWO']:
+        ticker = f"{target_code}{suffix}"
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="6mo")
+        if not hist.empty:
+            valid = True
+            info = stock.info
+            name = CHINESE_NAMES.get(target_code, info.get('shortName', target_code))
+            
+            # --- 顯示基本面與技術面表格 ---
+            ma20 = hist['Close'].rolling(window=20).mean().iloc[-1]
+            exp1 = hist['Close'].ewm(span=12, adjust=False).mean()
+            exp2 = hist['Close'].ewm(span=26, adjust=False).mean()
+            macd = exp1 - exp2
+            signal = macd.ewm(span=9, adjust=False).mean()
+            m_val = (macd - signal).iloc[-1]
+            
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("名稱/代號", f"{name} ({target_code})")
+            col2.metric("最新收盤價", f"{round(hist['Close'].iloc[-1], 2)}")
+            col3.metric("毛利率", format_pct(info.get('grossMargins')))
+            col4.metric("營收年增", format_pct(info.get('revenueGrowth')))
 
-if user_codes:
-    codes = [c.strip() for c in user_codes.split(',')]
-    full_data = []
-    with st.spinner("抓取數據中..."):
-        for code in codes:
-            valid = False
-            for suffix in ['.TW', '.TWO']:
-                ticker = f"{code}{suffix}"
-                stock = yf.Ticker(ticker)
-                hist = stock.history(period="6mo")
-                if not hist.empty:
-                    valid = True
-                    try:
-                        info = stock.info
-                        name = CHINESE_NAMES.get(code, info.get('shortName', code))
-                        last_price = round(hist['Close'].iloc[-1], 2)
-                        
-                        # 計算技術指標
-                        ma20 = hist['Close'].rolling(window=20).mean().iloc[-1]
-                        
-                        exp1 = hist['Close'].ewm(span=12, adjust=False).mean()
-                        exp2 = hist['Close'].ewm(span=26, adjust=False).mean()
-                        macd = exp1 - exp2
-                        signal = macd.ewm(span=9, adjust=False).mean()
-                        m_val = (macd - signal).iloc[-1]
-                        m_prev = (macd - signal).iloc[-2]
-                        
-                        if m_val > 0:
-                            m_status = "📈紅柱放大" if m_val > m_prev else "📉紅柱縮小"
-                        else:
-                            m_status = "🩸綠柱放大" if m_val < m_prev else "🟢反彈醞釀"
+            # --- 繪製 K 線圖 ---
+            fig = go.Figure(data=[go.Candlestick(
+                x=hist.index,
+                open=hist['Open'],
+                high=hist['High'],
+                low=hist['Low'],
+                close=hist['Close'],
+                name='K線'
+            )])
+            # 加入 20 日均線
+            fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'].rolling(window=20).mean(), 
+                                     line=dict(color='orange', width=1), name='20MA'))
+            
+            fig.update_layout(title=f"{name} ({target_code}) 半年 K 線圖",
+                              xaxis_rangeslider_visible=False, height=500)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # 詳細數據表
+            details = {
+                "P/E (本益比)": [info.get('trailingPE', 'N/A')],
+                "P/B (淨值比)": [info.get('priceToBook', 'N/A')],
+                "MACD 狀態": ["🟢醞釀反彈" if m_val < 0 and m_val > (macd-signal).iloc[-2] else "觀察中"],
+                "月線位階": ["🔴站上" if hist['Close'].iloc[-1] > ma20 else "🟢跌破"]
+            }
+            st.table(pd.DataFrame(details))
+            break
+    if not valid:
+        st.error("找不到該股票資料。")
 
-                        full_data.append({
-                            "名稱": name, "代號": code, "現價": last_price,
-                            "毛利率": format_pct(info.get('grossMargins')),
-                            "營收年增": format_pct(info.get('revenueGrowth')),
-                            "P/E(本益比)": info.get('trailingPE', 'N/A'),
-                            "P/B(淨值比)": info.get('priceToBook', 'N/A'),
-                            "MACD動能": m_status,
-                            "月線位階": "🔴站上" if last_price > ma20 else "🟢跌破"
-                        })
-                    except Exception:
-                        pass
-                    break
-            if not valid:
-                st.error(f"找不到代號: {code}")
-    
-    if full_data:
-        st.dataframe(pd.DataFrame(full_data), use_container_width=True)
-
-# --- 完整版解說指南 ---
+# --- 判讀指南 ---
 with st.expander("📊 點我看【數據判讀詳細指南】"):
     st.markdown("""
-    ### [1] 財報指標 (基本面防護網)
-    *   **毛利率**：數值越高，代表產品競爭力越強，不容易被取代（如台積電通常高於 50%）。
-    *   **營收年增**：大於 0 代表公司正在擴張；小於 0 需留意衰退。
-    *   **P/E (本益比)**：通常 < 15 為便宜，> 20 偏貴；高成長科技股可放寬標準。
-    *   **P/B (淨值比)**：適合傳產或金融股，< 1.2 通常具備長線底層價值。
-
-    ### [2] 技術指標 (短線進出參考)
-    *   **RSI (14)**：< 30 為極度超跌（易反彈）；> 70 為過熱（易拉回）。
-    *   **MACD 狀態**：
-        *   📈 **紅柱放大**：多頭強攻中。
-        *   🩸 **綠柱放大**：殺盤中，不宜接刀。
-        *   🟢 **反彈醞釀**：綠柱開始縮短，殺盤力道衰竭，是短線準備反彈的訊號。
-    *   **月線位階**：站上月線代表中期趨勢轉強，跌破則轉弱。
+    ### [1] K 線與均線 (20MA)
+    *   **20MA (月線)**：股價在橘色線之上代表短期強勢。
+    ### [2] 財報指標
+    *   **毛利率**：越高代表產品競爭力越強。
+    *   **本益比 (P/E)**：< 15 偏便宜，> 20 偏貴。
+    ### [3] 動能指標
+    *   **MACD 🟢反彈醞釀**：綠柱縮短，代表殺盤結束，準備上攻。
     """)
