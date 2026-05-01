@@ -1,17 +1,12 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import plotly.graph_objects as go
 from datetime import datetime
 import warnings
 
-# 忽略警告
 warnings.filterwarnings('ignore')
+st.set_page_config(page_title="投資決策雷達", layout="wide")
 
-# 網頁配置
-st.set_page_config(page_title="專業設備股雷達", layout="wide")
-
-# 中文翻譯字典 (完整涵蓋你的名單)
 CHINESE_NAMES = {
     '2330': '台積電', '3260': '威剛', '1802': '台玻', '2345': '智邦',
     '2454': '聯發科', '3711': '日月光', '3189': '景碩', '8028': '昇陽半',
@@ -20,87 +15,73 @@ CHINESE_NAMES = {
     '3163': '波若威', '3587': '閎康', '3066': '珍寶', '6515': '穎崴'
 }
 
-# 你的 17 檔核心追蹤名單
-TRACKING_LIST = [
-    '2454', '3711', '3189', '8028', '3661', '4576', '6285', '8064', 
-    '2345', '3028', '6147', '3289', '6830', '3163', '3587', '3066'
-]
+TRACKING_LIST = ['2454', '3711', '3189', '8028', '3661', '4576', '6285', '8064', '2345', '3028', '6147', '3289', '6830', '3163', '3587', '3066']
 
-def format_pct(val):
-    if pd.isna(val) or val is None: return 'N/A'
-    return f"{round(val * 100, 2)}%"
+def get_advice(rsi, m_val, m_prev, price, upper, lower):
+    """綜合評估買賣建議"""
+    if rsi < 35 and m_val > m_prev: return "🔥 超跌反彈 (分批布局)"
+    if price <= lower: return "🟢 觸及布林下軌 (支撐測試)"
+    if rsi > 75: return "⚠️ 極度過熱 (不宜追高)"
+    if price >= upper: return "🍎 觸及布林上軌 (壓力區)"
+    if m_val > 0 and m_val > m_prev: return "📈 多頭攻擊 (偏多看)"
+    return "⚪ 震盪整理"
 
-st.title("🛡️ 核心持股與設備追蹤系統")
+st.title("🛡️ 17 檔核心持股決策雷達")
 
-# --- 1. 每日追蹤名單：全數據大閱兵 ---
-st.subheader("📋 核心追蹤清單 (全數據監控)")
-if st.button("🔄 立即更新追蹤數據"):
-    all_tracking_data = []
-    with st.spinner("正在掃描 17 檔核心標的，請稍候..."):
+if st.button("🔄 執行全數據掃描"):
+    all_data = []
+    with st.spinner("正在進行深度量化運算..."):
         for code in TRACKING_LIST:
-            valid = False
             for suffix in ['.TW', '.TWO']:
                 t = yf.Ticker(f"{code}{suffix}")
                 h = t.history(period="6mo")
                 if not h.empty:
-                    valid = True
                     try:
                         info = t.info
-                        last_p = round(h['Close'].iloc[-1], 2)
-                        change = round(h['Close'].iloc[-1] - h['Close'].iloc[-2], 2)
+                        p = round(h['Close'].iloc[-1], 2)
                         
-                        # 技術指標計算
-                        ma20 = h['Close'].rolling(window=20).mean().iloc[-1]
-                        exp1 = h['Close'].ewm(span=12, adjust=False).mean()
-                        exp2 = h['Close'].ewm(span=26, adjust=False).mean()
-                        macd = exp1 - exp2
-                        sig = macd.ewm(span=9, adjust=False).mean()
-                        m_val = (macd - sig).iloc[-1]
-                        m_prev = (macd - sig).iloc[-2]
+                        # 技術指標：RSI
+                        delta = h['Close'].diff()
+                        gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
+                        loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
+                        rsi = round(100 - (100 / (1 + (gain/loss))), 2) if loss != 0 else 100
                         
-                        if m_val > 0:
-                            m_status = "📈紅柱" if m_val > m_prev else "📉紅縮"
-                        else:
-                            m_status = "🩸綠柱" if m_val < m_prev else "🟢反彈"
+                        # 技術指標：布林通道
+                        ma20 = h['Close'].rolling(20).mean()
+                        std20 = h['Close'].rolling(20).std()
+                        upper = ma20.iloc[-1] + 2 * std20.iloc[-1]
+                        lower = ma20.iloc[-1] - 2 * std20.iloc[-1]
+                        
+                        # 技術指標：MACD
+                        e1 = h['Close'].ewm(span=12, adjust=False).mean()
+                        e2 = h['Close'].ewm(span=26, adjust=False).mean()
+                        m = e1 - e2
+                        s = m.ewm(span=9, adjust=False).mean()
+                        m_v, m_p = (m-s).iloc[-1], (m-s).iloc[-2]
 
-                        all_tracking_data.append({
-                            "名稱": CHINESE_NAMES.get(code, code),
-                            "代號": code,
-                            "現價": last_p,
-                            "漲跌": change,
-                            "毛利率": format_pct(info.get('grossMargins')),
-                            "營收年增": format_pct(info.get('revenueGrowth')),
-                            "P/E": info.get('trailingPE', 'N/A'),
-                            "MACD": m_status,
-                            "月線": "🔴站上" if last_p > ma20 else "🟢跌破"
+                        all_data.append({
+                            "名稱": CHINESE_NAMES.get(code, code), "現價": p,
+                            "RSI": rsi, "P/E": info.get('trailingPE', 'N/A'), "P/B": info.get('priceToBook', 'N/A'),
+                            "毛利": f"{round(info.get('grossMargins', 0)*100, 2)}%",
+                            "決策建議": get_advice(rsi, m_v, m_p, p, upper, lower)
                         })
                     except: pass
                     break
-    if all_tracking_data:
-        st.dataframe(pd.DataFrame(all_tracking_data), use_container_width=True)
+    st.dataframe(pd.DataFrame(all_data), use_container_width=True)
 
 st.divider()
 
-# --- 2. 個股技術 K 線分析 ---
-st.subheader("🔍 個股 K 線與趨勢圖")
-target = st.text_input("輸入代號查看細節 (例如: 3260)", "3260")
-if target:
-    for suffix in ['.TW', '.TWO']:
-        t = yf.Ticker(f"{target}{suffix}")
-        h = t.history(period="6mo")
-        if not h.empty:
-            # 繪製 K 線
-            fig = go.Figure(data=[go.Candlestick(x=h.index, open=h['Open'], high=h['High'], low=h['Low'], close=h['Close'], name='K線')])
-            fig.add_trace(go.Scatter(x=h.index, y=h['Close'].rolling(window=20).mean(), line=dict(color='orange', width=1.5), name='20MA'))
-            fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_dark")
-            st.plotly_chart(fig, use_container_width=True)
-            break
-
-# --- 3. 判讀指南 ---
-with st.expander("📖 數據判讀詳細指南"):
+with st.expander("📖 投資決策指標與 K 線白話解析"):
     st.markdown("""
-    *   **現價/漲跌**：當日走勢。
-    *   **毛利率**：產品競爭力關鍵（設備股建議 > 35%）。
-    *   **MACD 🟢反彈**：代表殺盤力道衰竭，是極短線的買進參考點。
-    *   **月線 🔴站上**：代表中期波段趨勢轉強。
+    ### 1. K 線的靈魂：開高低收
+    *   **紅棒 (陽線)**：收盤高於開盤。代表多頭（買方）獲勝，氣勢轉強。
+    *   **長下影線**：股價曾重摔但被打撈上來。這通常是「止跌」或「測支撐」的訊號。
+
+    ### 2. 買點判斷：如何評估「要買了」？
+    *   **RSI < 30 (超賣區)**：就像彈簧被壓到極限，隨時會強烈反彈。
+    *   **布林下軌 (支撐線)**：股價跌到這裡通常會有護盤力道，適合分批布局。
+    *   **MACD 綠柱縮小**：代表賣壓吐完了，動能準備轉正。
+
+    ### 3. 安全邊際：財報輔助
+    *   **P/E < 15 & 毛利 > 30%**：這代表公司有賺錢能力且股價不貴，買起來心裡比較踏實。
     """)
