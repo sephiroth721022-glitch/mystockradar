@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import warnings
 
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="行動決策雷達 2.0", layout="wide")
+st.set_page_config(page_title="AI 行動決策雷達 2.0", layout="wide")
 
 # 核心字典
 CHINESE_NAMES = {
@@ -17,30 +17,26 @@ CHINESE_NAMES = {
 }
 
 if 'my_list' not in st.session_state:
-    st.session_state.my_list = ['2454', '3711', '3189', '8028', '3661', '4576', '2345', '3028', '3289', '6830', '3587']
+    st.session_state.my_list = ['2454', '3711', '3189', '8028', '3587', '4576']
 
 def analyze_k_logic(h):
     """AI 自動判讀 5 日 K 線行為"""
+    if len(h) < 5: return "⌛ 資料不足"
     last_5 = h.tail(5)
-    c = last_5['Close']
-    o = last_5['Open']
-    hi = last_5['High']
-    lo = last_5['Low']
+    c, o, hi, lo = last_5['Close'], last_5['Open'], last_5['High'], last_5['Low']
     
     # 趨勢判定
     is_rising = all(hi.diff().dropna() > 0)
     is_falling = all(lo.diff().dropna() < 0)
     
-    # 最新一根 K 線特徵
     curr_body = abs(c.iloc[-1] - o.iloc[-1])
     upper_s = hi.iloc[-1] - max(c.iloc[-1], o.iloc[-1])
     lower_s = min(c.iloc[-1], o.iloc[-1]) - lo.iloc[-1]
     
     if is_rising: return "📈 強勢多頭 (階梯式上漲)"
     if is_falling: return "📉 弱勢空頭 (逐波探底)"
-    if lower_s > curr_body * 1.5: return "🛡️ 下影支撐 (低檔有守)"
-    if upper_s > curr_body * 1.5: return "⚠️ 上影壓力 (高檔拋售)"
-    if c.iloc[-1] > o.iloc[-1] and curr_body > (c-o).abs().mean(): return "🔥 實體紅棒 (多方發動)"
+    if lower_s > curr_body * 1.2: return "🛡️ 下影支撐 (低檔有守)"
+    if upper_s > curr_body * 1.2: return "⚠️ 上影壓力 (高檔拋售)"
     return "⚖️ 區間震盪"
 
 def plot_mini_candle(df):
@@ -52,23 +48,27 @@ def plot_mini_candle(df):
         low=last_5['Low'], close=last_5['Close'],
         increasing_line_color='#FF4B4B', decreasing_line_color='#00CC96'
     )])
-    fig.update_layout(height=180, margin=dict(l=5, r=5, t=5, b=5),
+    fig.update_layout(height=200, margin=dict(l=5, r=5, t=5, b=5),
                       xaxis_rangeslider_visible=False, template="plotly_white")
     return fig
 
 def fetch_data(code):
+    # 嘗試兩種後綴
     for suffix in ['.TW', '.TWO']:
-        t = yf.Ticker(f"{code}{suffix}")
-        h = t.history(period="1m") # 縮短抓取時間提高效率
-        if not h.empty:
+        ticker_str = f"{code}{suffix}"
+        t = yf.Ticker(ticker_str)
+        # period 改為 1個月，確保留有足夠計算空間
+        h = t.history(period="1mo") 
+        if not h.empty and len(h) >= 5:
             try:
                 p = round(h['Close'].iloc[-1], 2)
-                change = round(p - h['Close'].iloc[-2], 2)
+                prev_p = h['Close'].iloc[-2]
+                change = round(p - prev_p, 2)
                 
                 # 指標計算
-                vol_ratio = round(h['Volume'].iloc[-1] / h['Volume'].rolling(5).mean().iloc[-1], 2)
-                ma20 = h['Close'].rolling(20).mean().iloc[-1]
-                rsi = 50 # 簡化計算或使用自定義
+                vol_avg5 = h['Volume'].rolling(5).mean().iloc[-1]
+                vol_ratio = round(h['Volume'].iloc[-1] / vol_avg5, 2) if vol_avg5 > 0 else 1.0
+                ma20 = h['Close'].rolling(20).mean().iloc[-1] if len(h) >= 20 else h['Close'].mean()
                 
                 return {
                     "name": CHINESE_NAMES.get(code, code),
@@ -77,7 +77,8 @@ def fetch_data(code):
                     "k_text": analyze_k_logic(h),
                     "df": h
                 }
-            except: pass
+            except Exception as e:
+                continue
     return None
 
 # --- UI 介面 ---
@@ -86,7 +87,7 @@ st.title("🚀 AI 行動投資決策雷達")
 # 側邊欄
 with st.sidebar:
     st.header("清單管理")
-    new_id = st.text_input("新增代號:")
+    new_id = st.text_input("新增代號 (如: 2330):")
     if st.button("加入"):
         if new_id and new_id not in st.session_state.my_list:
             st.session_state.my_list.append(new_id)
@@ -97,32 +98,30 @@ with st.sidebar:
         st.session_state.my_list.remove(del_id)
         st.rerun()
 
-# 主畫面刷新
-if st.button("🔄 刷新即時 AI 判讀"):
-    for code in st.session_state.my_list:
-        data = fetch_data(code)
-        if data:
-            with st.container():
-                # 標題列
-                col1, col2 = st.columns([3, 2])
-                color = "red" if data['change'] >= 0 else "green"
-                col1.subheader(f"{data['name']} ({data['id']})")
-                col2.markdown(f"### :{color}[${data['p']} ({data['change']})]")
-                
-                # K線與判讀文字
-                c_left, c_right = st.columns([1.5, 1])
-                with c_left:
-                    st.plotly_chart(plot_mini_candle(data['df']), use_container_width=True, config={'displayModeBar': False})
-                with c_right:
-                    st.info(f"**AI 形態判讀**\n\n{data['k_text']}")
-                    st.metric("量能爆發比", f"{data['v_ratio']}x")
-                
-                # 關鍵指標
-                m1, m2, m3 = st.columns(3)
-                m1.caption(f"月線支撐: {data['ma20']}")
-                m2.caption(f"乖離率: {round(((data['p']-data['ma20'])/data['ma20'])*100, 2)}%")
-                m3.caption(f"趨勢狀態: {'偏多' if data['p'] > data['ma20'] else '偏空'}")
-                
-                st.divider()
-
-st.caption("註：量能比 > 1.5 代表異常熱絡；型態判讀僅供參考，請結合市場消息。")
+# 主畫面
+if st.button("🔄 刷新即時數據"):
+    with st.spinner("正在讀取市場數據..."):
+        # 建立容器顯示結果
+        for code in st.session_state.my_list:
+            data = fetch_data(code)
+            if data:
+                with st.container():
+                    c1, c2 = st.columns([3, 2])
+                    color = "red" if data['change'] >= 0 else "green"
+                    c1.subheader(f"{data['name']} ({data['id']})")
+                    c2.markdown(f"### :{color}[${data['p']} ({data['change']})]")
+                    
+                    col_left, col_right = st.columns([1.5, 1])
+                    with col_left:
+                        st.plotly_chart(plot_mini_candle(data['df']), use_container_width=True, config={'displayModeBar': False})
+                    with col_right:
+                        st.success(f"**AI 型態判讀**\n\n{data['k_text']}")
+                        st.metric("量能爆發比", f"{data['v_ratio']}x")
+                    
+                    m1, m2, m3 = st.columns(3)
+                    m1.caption(f"支撐位(MA20): {data['ma20']}")
+                    m2.caption(f"乖離率: {round(((data['p']-data['ma20'])/data['ma20'])*100, 2)}%")
+                    m3.caption(f"狀態: {'多頭' if data['p'] > data['ma20'] else '空頭'}")
+                    st.divider()
+            else:
+                st.warning(f"無法取得代號 {code} 的資料，請確認代號是否正確或稍後再試。")
