@@ -21,6 +21,18 @@ CHINESE_NAMES = {
 def normalize_taiwan_code(code: str) -> str:
     return code.upper().replace(' ', '')
 
+def resolve_chinese_name_to_codes(name: str) -> list[str]:
+    name = name.strip()
+    if not name:
+        return []
+
+    exact_match = {v: k for k, v in CHINESE_NAMES.items()}
+    if name in exact_match:
+        return [exact_match[name]]
+
+    partial_matches = [k for k, v in CHINESE_NAMES.items() if name in v]
+    return partial_matches
+
 @st.cache_data(ttl=3600)
 def fetch_stock_data(symbol: str, period: str):
     ticker = yf.Ticker(symbol)
@@ -227,7 +239,7 @@ st.write(f"系統更新時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 col1, col2 = st.columns([2, 1])
 with col1:
     codes_input = st.text_input(
-        "輸入台灣股票代號（可用逗號分隔多個代號，例如 2330, 0050, 2454）",
+        "輸入台灣股票代號或中文名稱（可用逗號分隔多個項目，例如 2330, 0050, 台積電）",
         value=''
     ).strip()
 
@@ -235,12 +247,31 @@ with col2:
     period = st.selectbox("歷史數據期間", ['3mo', '6mo', '1y', '2y'], index=1)
     show_chart = st.checkbox('顯示技術指標圖表', value=True)
 
+def parse_input_codes(codes_input: str) -> tuple[list[str], list[str]]:
+    items = [item.strip() for item in codes_input.split(',') if item.strip()]
+    resolved_codes = []
+    unknown_items = []
+
+    for item in items:
+        item_code = normalize_taiwan_code(item).replace('.TW', '').replace('.TWO', '')
+        if item in CHINESE_NAMES.values() or any(ord(ch) > 127 for ch in item):
+            code_matches = resolve_chinese_name_to_codes(item)
+            if code_matches:
+                resolved_codes.extend(code_matches)
+                continue
+
+        if item_code.isdigit() or item_code.endswith(('.TW', '.TWO')):
+            resolved_codes.append(item_code)
+        else:
+            unknown_items.append(item)
+
+    return list(dict.fromkeys(resolved_codes)), unknown_items
+
+
 if st.button("執行全方位健檢"):
-    codes = [
-        code.upper().replace('.TW', '').replace(' ', '')
-        for code in codes_input.split(',')
-        if code.strip()
-    ]
+    codes, unknown_items = parse_input_codes(codes_input)
+    if unknown_items:
+        st.warning('以下輸入項目無對應股票代號: ' + ', '.join(unknown_items))
 
     if not codes:
         st.warning('請先選擇或輸入至少一個股票代號。')
