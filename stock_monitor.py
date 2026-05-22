@@ -1,106 +1,279 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
-import warnings
+from plotly.subplots import make_subplots
+from datetime import datetime
 
-warnings.filterwarnings('ignore')
-st.set_page_config(page_title="AI 行動決策雷達 2.0", layout="wide")
+# 頁面設定
+st.set_page_config(page_title="完美股票分析系統", layout="wide")
 
+# 基礎資料設定
 CHINESE_NAMES = {
+    '3131': '弘塑', '3583': '辛耘', '6187': '萬潤', '1560': '中砂',
+    '3680': '家登', '3413': '京鼎', '2404': '漢唐', '6196': '帆宣',
+    '6640': '均華', '6667': '信紘科', '6515': '穎崴', '3402': '漢科',
     '2330': '台積電', '3260': '威剛', '1802': '台玻', '2345': '智邦',
-    '2454': '聯發科', '3711': '日月光', '3189': '景碩', '8028': '昇陽半',
-    '3587': '閎康', '4576': '大銀微', '6830': '汎銓'
+    '2317': '鴻海', '2454': '聯發科', '0050': '元大台灣50'
 }
 
-if 'my_list' not in st.session_state:
-    st.session_state.my_list = ['2454', '3711', '8028', '3587', '4576']
+@st.cache_data(ttl=3600)
+def fetch_stock_data(symbol: str, period: str):
+    ticker = yf.Ticker(symbol)
+    hist = ticker.history(period=period)
+    info = ticker.info or {}
+    return hist, info
 
-# --- 左側邊欄：名單管理 + 深度名詞解釋 ---
-with st.sidebar:
-    st.header("⚙️ 清單管理")
-    new_id = st.text_input("新增代號:")
-    if st.button("加入清單") and new_id:
-        if new_id not in st.session_state.my_list:
-            st.session_state.my_list.append(new_id)
-            st.rerun()
+
+def calculate_indicators(df: pd.DataFrame):
+    df = df.copy()
+    df['RSV'] = (df['Close'] - df['Low'].rolling(9).min()) / (
+        df['High'].rolling(9).max() - df['Low'].rolling(9).min()) * 100
+    df['RSV'] = df['RSV'].fillna(50)
+    df['K'] = df['RSV'].ewm(alpha=1/3, adjust=False).mean()
+    df['D'] = df['K'].ewm(alpha=1/3, adjust=False).mean()
+
+    delta = df['Close'].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
+    df['RSI'] = 100 - 100 / (1 + gain.div(loss.replace(0, np.nan)))
+
+    df['MA20'] = df['Close'].rolling(20).mean()
+    df['STD20'] = df['Close'].rolling(20).std()
+    df['UpperBand'] = df['MA20'] + 2 * df['STD20']
+    df['LowerBand'] = df['MA20'] - 2 * df['STD20']
+    df['SMA50'] = df['Close'].rolling(50).mean()
+    df['SMA200'] = df['Close'].rolling(200).mean()
+
+    df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
+    df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = df['EMA12'] - df['EMA26']
+    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['Hist'] = df['MACD'] - df['Signal']
+
+    latest = {
+        'K': round(df['K'].iloc[-1], 2),
+        'D': round(df['D'].iloc[-1], 2),
+        'RSI': round(df['RSI'].iloc[-1], 2),
+        'UpperBand': round(df['UpperBand'].iloc[-1], 2),
+        'LowerBand': round(df['LowerBand'].iloc[-1], 2),
+        'MA20': round(df['MA20'].iloc[-1], 2) if not np.isnan(df['MA20'].iloc[-1]) else None,
+        'SMA50': round(df['SMA50'].iloc[-1], 2) if not np.isnan(df['SMA50'].iloc[-1]) else None,
+        'SMA200': round(df['SMA200'].iloc[-1], 2) if not np.isnan(df['SMA200'].iloc[-1]) else None,
+        'MACD': round(df['MACD'].iloc[-1], 2),
+        'Signal': round(df['Signal'].iloc[-1], 2),
+        'Hist': round(df['Hist'].iloc[-1], 2),
+        'Hist_prev': round(df['Hist'].iloc[-2], 2) if len(df) > 1 else 0
+    }
+
+    return latest, df
+
+
+def kd_judgement(latest: dict) -> str:
+    if latest['K'] > latest['D']:
+        return 'KD 黃金交叉'
+    return 'KD 死亡交叉'
+
+
+def rsi_judgement(latest: dict) -> str:
+    if latest['RSI'] >= 70:
+        return 'RSI 過熱'
+    if latest['RSI'] <= 30:
+        return 'RSI 超賣'
+    return 'RSI 中性'
+
+
+def bollinger_judgement(latest: dict, close_price: float) -> str:
+    if close_price >= latest['UpperBand']:
+        return '價格觸及布林上軌，可能過熱'
+    if close_price <= latest['LowerBand']:
+        return '價格接近布林下軌，可能反彈'
+    return '價格位於布林帶內側'
+
+
+def macd_judgement(latest: dict) -> str:
+    hist_current = latest['Hist']
+    hist_prev = latest['Hist_prev']
+    hist_abs_current = abs(hist_current)
+    hist_abs_prev = abs(hist_prev)
     
-    del_id = st.selectbox("移除代號:", ["---"] + st.session_state.my_list)
-    if st.button("確認移除") and del_id != "---":
-        st.session_state.my_list.remove(del_id)
-        st.rerun()
+    if hist_current > 0:  # 紅柱
+        if hist_abs_current > hist_abs_prev:
+            return 'MACD 紅柱擴張，多頭動能增強'
+        elif hist_abs_current < hist_abs_prev:
+            return 'MACD 紅柱縮小，多頭動能衰減，警訊'
+        else:
+            return 'MACD 多頭勢頭'
+    else:  # 綠柱
+        if hist_abs_current > hist_abs_prev:
+            return 'MACD 綠柱擴張，空頭動能增強，危險'
+        elif hist_abs_current < hist_abs_prev:
+            return 'MACD 綠柱縮小，空頭衰減，反彈訊號'
+        else:
+            return 'MACD 空頭勢頭'
 
-    st.divider()
-    st.header("📚 投資名詞百科")
-    with st.expander("📈 什麼是「多頭 / 空頭」？"):
-        st.write("**多頭 (Bullish)**：市場樂觀，股價低點不斷墊高，像公牛向上頂。")
-        st.write("**空頭 (Bearish)**：市場悲觀，股價高點不斷下移，像黑熊向下拍。")
-    
-    with st.expander("🛡️ 什麼是「下影支撐」？"):
-        st.write("代表股價跌下去後被強力拉回。若發生在**月線附近**且**帶量**，通常是買點訊號。")
-        
-    with st.expander("🚀 什麼是「量能爆發比」？"):
-        st.write("今日成交量 ÷ 過去5日平均量。")
-        st.write("> 1.5x：代表有人在裡面大殺大砍或狂買，必有大事。")
-        st.write("< 0.7x：代表窒息量，市場沒人理，股價難動。")
 
-    with st.expander("📏 什麼是「乖離率」？"):
-        st.write("股價跟月線的距離。")
-        st.write("> 10%：漲太兇，小心回檔。")
-        st.write("< -10%：跌太深，可能反彈。")
+def trend_judgement(latest: dict, close_price: float) -> str:
+    if latest['SMA50'] and latest['SMA200']:
+        if close_price > latest['SMA50'] and close_price > latest['SMA200']:
+            return '價格站上SMA50/SMA200，趨勢偏多'
+        if close_price < latest['SMA50'] and close_price < latest['SMA200']:
+            return '價格跌破SMA50/SMA200，趨勢偏空'
+        return '多空分歧，趨勢待觀察'
+    if latest['SMA50']:
+        return '價格相對SMA50的趨勢判斷可參考中期趨勢'
+    return '資料不足，無法判斷中長期趨勢'
 
-# --- 核心邏輯與畫面 ---
-def analyze_k_logic(h):
-    if len(h) < 5: return "資料讀取中"
-    last_5 = h.tail(5)
-    c, o, hi, lo = last_5['Close'], last_5['Open'], last_5['High'], last_5['Low']
-    vol_ratio = h['Volume'].iloc[-1] / h['Volume'].rolling(5).mean().iloc[-1]
-    
-    is_rising = all(hi.diff().dropna() > 0)
-    curr_body = abs(c.iloc[-1] - o.iloc[-1])
-    lower_s = min(c.iloc[-1], o.iloc[-1]) - lo.iloc[-1]
-    upper_s = hi.iloc[-1] - max(c.iloc[-1], o.iloc[-1])
-    
-    # 結合量能的判讀
-    if is_rising and vol_ratio > 1.2: return "🚀 強勢進攻 (量價齊揚，續抱)"
-    if lower_s > curr_body * 1.3:
-        return "🛡️ 下影支撐 (低檔有守，若在月線旁可考慮)" if vol_ratio > 1 else "🛡️ 下影線 (量不足，再觀察)"
-    if upper_s > curr_body * 1.3: return "⚠️ 上影壓力 (高檔有人拋售，先別買)"
-    if c.iloc[-1] > o.iloc[-1] and vol_ratio > 2: return "🔥 爆量長紅 (主力發動，追蹤焦點)"
-    return "⚖️ 區間震盪 (等待表態)"
 
-def fetch_data(code):
-    for suffix in ['.TW', '.TWO']:
-        t = yf.Ticker(f"{code}{suffix}")
-        h = t.history(period="1mo")
-        if not h.empty and len(h) >= 5:
-            p = round(h['Close'].iloc[-1], 2)
-            change = round(p - h['Close'].iloc[-2], 2)
-            vol_ratio = round(h['Volume'].iloc[-1] / h['Volume'].rolling(5).mean().iloc[-1], 2)
-            ma20 = h['Close'].rolling(20).mean().iloc[-1]
-            return {"name": CHINESE_NAMES.get(code, code), "id": code, "p": p, "change": change, "v_ratio": vol_ratio, "ma20": round(ma20, 1), "k_text": analyze_k_logic(h), "df": h}
-    return None
+def valuation_judgement(info: dict) -> str:
+    pe = info.get('trailingPE')
+    if pe and pe > 25:
+        return 'P/E 偏高，估值需要留意'
+    if pe and pe < 15:
+        return 'P/E 偏低，估值相對吸引'
+    return '估值一般'
 
-st.title("📱 AI 行動決策雷達 2.0")
 
-if st.button("🔄 刷新即時 AI 判讀"):
-    for code in st.session_state.my_list:
-        data = fetch_data(code)
-        if data:
-            with st.container():
-                c1, c2 = st.columns([3, 2])
-                color = "#FF4B4B" if data['change'] >= 0 else "#00CC96"
-                c1.subheader(f"{data['name']} ({data['id']})")
-                c2.markdown(f"### <span style='color:{color}'>${data['p']} ({data['change']})</span>", unsafe_allow_html=True)
-                
-                col_l, col_r = st.columns([1.5, 1])
-                with col_l:
-                    fig = go.Figure(data=[go.Candlestick(x=data['df'].tail(5).index.strftime('%m/%d'), open=data['df'].tail(5)['Open'], high=data['df'].tail(5)['High'], low=data['df'].tail(5)['Low'], close=data['df'].tail(5)['Close'], increasing_line_color='#FF4B4B', decreasing_line_color='#00CC96')])
-                    fig.update_layout(height=180, margin=dict(l=5, r=5, t=5, b=5), xaxis_rangeslider_visible=False, template="plotly_white")
-                    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-                
-                with col_r:
-                    st.success(f"**AI 建議**\n\n{data['k_text']}")
-                    st.metric("量能爆發比", f"{data['v_ratio']}x", delta=f"{round(data['v_ratio']-1,2)}x")
-                
-                st.divider()
+def build_signal_text(latest: dict, close_price: float, info: dict):
+    texts = [
+        kd_judgement(latest),
+        rsi_judgement(latest),
+        bollinger_judgement(latest, close_price),
+        macd_judgement(latest),
+        trend_judgement(latest, close_price)
+    ]
+    return '；'.join(texts)
+
+
+def create_stock_figure(df: pd.DataFrame, code: str):
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        row_heights=[0.5, 0.2, 0.25],
+        specs=[[{"type": "candlestick"}], [{"type": "scatter"}], [{"type": "scatter"}]]
+    )
+
+    fig.add_trace(
+        go.Candlestick(
+            x=df.index,
+            open=df['Open'],
+            high=df['High'],
+            low=df['Low'],
+            close=df['Close'],
+            name='K 線'
+        ),
+        row=1,
+        col=1
+    )
+
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='blue', width=1), name='MA20'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['UpperBand'], line=dict(color='orange', width=1, dash='dash'), name='UpperBand'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['LowerBand'], line=dict(color='orange', width=1, dash='dash'), name='LowerBand'), row=1, col=1)
+    if 'SMA50' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA50'], line=dict(color='green', width=1), name='SMA50'), row=1, col=1)
+    if 'SMA200' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA200'], line=dict(color='purple', width=1), name='SMA200'), row=1, col=1)
+
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='magenta', width=1), name='RSI'), row=2, col=1)
+    fig.add_hline(y=70, line=dict(color='red', dash='dash'), row=2, col=1)
+    fig.add_hline(y=30, line=dict(color='green', dash='dash'), row=2, col=1)
+
+    fig.add_trace(go.Bar(x=df.index, y=df['Hist'], marker_color=np.where(df['Hist'] >= 0, 'green', 'red'), name='MACD Hist'), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], line=dict(color='blue', width=1), name='MACD'), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Signal'], line=dict(color='orange', width=1), name='Signal'), row=3, col=1)
+
+    fig.update_layout(
+        title_text=f"{code} 技術指標分析",
+        xaxis_rangeslider_visible=False,
+        legend_orientation='h',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+    )
+
+    return fig
+
+
+# 介面呈現
+st.title("📈 完美股票全方位分析系統")
+st.write(f"系統更新時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+col1, col2 = st.columns([2, 1])
+with col1:
+    selected_codes = st.multiselect("請選擇個股代號", list(CHINESE_NAMES.keys()), default=['3131', '3583', '2330'])
+    custom_code = st.text_input("或輸入個股代號（例如 2330）", value='').strip()
+
+with col2:
+    period = st.selectbox("歷史數據期間", ['3mo', '6mo', '1y', '2y'], index=1)
+    show_chart = st.checkbox('顯示技術指標圖表', value=True)
+
+if st.button("執行全方位健檢"):
+    codes = []
+    codes.extend(selected_codes)
+    if custom_code:
+        normalized = custom_code.upper().replace('.TW', '').replace(' ', '')
+        codes.append(normalized)
+
+    if not codes:
+        st.warning('請先選擇或輸入至少一個股票代號。')
+    else:
+        results = []
+        for code in codes:
+            symbol = f"{code}.TW" if not code.endswith('.TW') else code
+            with st.spinner(f'抓取 {code} 資料...'):
+                try:
+                    hist, info = fetch_stock_data(symbol, period)
+                except Exception as exc:
+                    st.error(f'無法抓取 {code}，原因: {exc}')
+                    continue
+
+            if hist.empty or len(hist) < 35:
+                st.warning(f'{code} 的歷史資料不足，請確認代號是否正確或更換期間。')
+                continue
+
+            latest, hist = calculate_indicators(hist)
+            close_price = float(hist['Close'].iloc[-1])
+            fund_info = {
+                'P/E': info.get('trailingPE', 'N/A'),
+                'P/B': info.get('priceToBook', 'N/A'),
+                'ROE': info.get('returnOnEquity', 'N/A'),
+                'DividendYield': info.get('dividendYield', 'N/A')
+            }
+            signal_text = build_signal_text(latest, close_price, info)
+
+            results.append({
+                '代號': code,
+                '名稱': CHINESE_NAMES.get(code.replace('.TW', ''), code),
+                '收盤價': round(close_price, 2),
+                'KD 判斷': kd_judgement(latest),
+                'RSI 判斷': rsi_judgement(latest),
+                'MACD 判斷': macd_judgement(latest),
+                '布林 判斷': bollinger_judgement(latest, close_price),
+                '趨勢判斷': trend_judgement(latest, close_price),
+                '判斷': signal_text
+            })
+
+            if show_chart:
+                st.subheader(f"{code} 技術分析圖表")
+                fig = create_stock_figure(hist, code)
+                st.plotly_chart(fig, use_container_width=True)
+
+        if results:
+            df_result = pd.DataFrame(results)
+            st.dataframe(df_result, use_container_width=True)
+
+with st.expander("📊 【股市數據判讀指南】(點擊展開)"):
+    st.markdown("""
+    - **財報基礎**：毛利率/營益率高代表競爭力與本業獲利強。
+    - **估值指標**：P/E < 15 偏低，P/B < 1.2 有長線價值。
+    - **技術指標**：
+      - **RSI**：> 70 過熱 | < 30 超賣。
+      - **KD**：黃金交叉(買進訊號) | 死亡交叉(賣出訊號)。
+      - **MACD**：Hist > 0 多頭勢頭 | Hist < 0 空頭勢頭。
+      - **布林**：觸上軌(過熱) | 觸下軌(超跌反彈點)。
+      - **SMA50 / SMA200**：價格站上代表中長線趨勢偏多。
+    - 表格現在只顯示技術指標判斷結果，不再顯示原始數值。
+    """)
+
+st.info("💡 部署後可透過 Streamlit 介面選股、查詢期間、並檢視技術指標圖表。")
