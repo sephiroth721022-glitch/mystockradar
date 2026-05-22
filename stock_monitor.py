@@ -18,12 +18,37 @@ CHINESE_NAMES = {
     '2317': '鴻海', '2454': '聯發科', '0050': '元大台灣50'
 }
 
+def normalize_taiwan_code(code: str) -> str:
+    return code.upper().replace(' ', '')
+
 @st.cache_data(ttl=3600)
 def fetch_stock_data(symbol: str, period: str):
     ticker = yf.Ticker(symbol)
     hist = ticker.history(period=period)
     info = ticker.info or {}
     return hist, info
+
+@st.cache_data(ttl=3600)
+def fetch_taiwan_stock_data(code: str, period: str):
+    code = normalize_taiwan_code(code)
+    if code.endswith(('.TW', '.TWO')):
+        try:
+            hist, info = fetch_stock_data(code, period)
+            return code, hist, info
+        except Exception:
+            return code, pd.DataFrame(), {}
+
+    for suffix in ['.TW', '.TWO']:
+        symbol = f'{code}{suffix}'
+        try:
+            hist, info = fetch_stock_data(symbol, period)
+        except Exception:
+            hist = pd.DataFrame()
+            info = {}
+        if not hist.empty:
+            return symbol, hist, info
+
+    return f'{code}.TW', pd.DataFrame(), {}
 
 
 def calculate_indicators(df: pd.DataFrame):
@@ -201,32 +226,29 @@ st.write(f"系統更新時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 col1, col2 = st.columns([2, 1])
 with col1:
-    selected_codes = st.multiselect("請選擇個股代號", list(CHINESE_NAMES.keys()), default=['3131', '3583', '2330'])
-    custom_code = st.text_input("或輸入個股代號（例如 2330）", value='').strip()
+    codes_input = st.text_input(
+        "輸入台灣股票代號（可用逗號分隔多個代號，例如 2330, 0050, 2454）",
+        value=''
+    ).strip()
 
 with col2:
     period = st.selectbox("歷史數據期間", ['3mo', '6mo', '1y', '2y'], index=1)
     show_chart = st.checkbox('顯示技術指標圖表', value=True)
 
 if st.button("執行全方位健檢"):
-    codes = []
-    codes.extend(selected_codes)
-    if custom_code:
-        normalized = custom_code.upper().replace('.TW', '').replace(' ', '')
-        codes.append(normalized)
+    codes = [
+        code.upper().replace('.TW', '').replace(' ', '')
+        for code in codes_input.split(',')
+        if code.strip()
+    ]
 
     if not codes:
         st.warning('請先選擇或輸入至少一個股票代號。')
     else:
         results = []
         for code in codes:
-            symbol = f"{code}.TW" if not code.endswith('.TW') else code
             with st.spinner(f'抓取 {code} 資料...'):
-                try:
-                    hist, info = fetch_stock_data(symbol, period)
-                except Exception as exc:
-                    st.error(f'無法抓取 {code}，原因: {exc}')
-                    continue
+                symbol, hist, info = fetch_taiwan_stock_data(code, period)
 
             if hist.empty or len(hist) < 35:
                 st.warning(f'{code} 的歷史資料不足，請確認代號是否正確或更換期間。')
