@@ -15,7 +15,7 @@ CHINESE_NAMES = {
     '3680': '家登', '3413': '京鼎', '2404': '漢唐', '6196': '帆宣',
     '6640': '均華', '6667': '信紘科', '6515': '穎崴', '3402': '漢科',
     '2330': '台積電', '3260': '威剛', '1802': '台玻', '2345': '智邦',
-    '2317': '鴻海', '2454': '聯發科', '0050': '元大台灣50'
+    '2317': '鴻海', '2454': '聯發科', '0050': '元大台灣50', '3026': '禾伸堂'
 }
 
 def normalize_taiwan_code(code: str) -> str:
@@ -54,11 +54,10 @@ def fetch_taiwan_stock_data(code: str, period: str):
         symbol = f'{code}{suffix}'
         try:
             hist, info = fetch_stock_data(symbol, period)
+            if not hist.empty and len(hist) >= 5:  # 至少需要 5 筆數據
+                return symbol, hist, info
         except Exception:
-            hist = pd.DataFrame()
-            info = {}
-        if not hist.empty:
-            return symbol, hist, info
+            pass
 
     return f'{code}.TW', pd.DataFrame(), {}
 
@@ -281,8 +280,12 @@ if st.button("執行全方位健檢"):
             with st.spinner(f'抓取 {code} 資料...'):
                 symbol, hist, info = fetch_taiwan_stock_data(code, period)
 
-            if hist.empty or len(hist) < 35:
-                st.warning(f'{code} 的歷史資料不足，請確認代號是否正確或更換期間。')
+            if hist.empty:
+                st.error(f'❌ {code} - 無法取得數據，請確認代號是否正確（可能 yfinance 尚不支援此股票）。')
+                continue
+            
+            if len(hist) < 35:
+                st.warning(f'⚠️ {code} - 資料不足（僅 {len(hist)} 筆記錄），建議選擇更長期間（如 1y 或 2y）。')
                 continue
 
             latest, hist = calculate_indicators(hist)
