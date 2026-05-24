@@ -41,26 +41,33 @@ def fetch_stock_data(symbol: str, period: str):
     return hist, info
 
 @st.cache_data(ttl=3600)
-def fetch_taiwan_stock_data(code: str, period: str):
-    code = normalize_taiwan_code(code)
+code = normalize_taiwan_code(code)
+    
+    # 建立可能的符號清單
+    possible_symbols = []
     if code.endswith(('.TW', '.TWO')):
-        try:
-            hist, info = fetch_stock_data(code, period)
-            return code, hist, info
-        except Exception:
-            return code, pd.DataFrame(), {}
+        possible_symbols = [code]
+    else:
+        possible_symbols = [f'{code}.TW', f'{code}.TWO']
 
-    for suffix in ['.TW', '.TWO']:
-        symbol = f'{code}{suffix}'
+    for symbol in possible_symbols:
         try:
-            hist, info = fetch_stock_data(symbol, period)
-            if not hist.empty and len(hist) >= 5:  # 至少需要 5 筆數據
+            ticker = yf.Ticker(symbol)
+            # 優先抓取歷史資料
+            hist = ticker.history(period=period)
+            
+            # 只要有歷史資料，就視為成功，不強求 info 必須完整
+            if not hist.empty and len(hist) >= 5:
+                # 若 info 無法獲取，直接給一個空字典，避免報錯
+                try:
+                    info = ticker.info
+                except:
+                    info = {}
                 return symbol, hist, info
         except Exception:
-            pass
+            continue 
 
     return f'{code}.TW', pd.DataFrame(), {}
-
 
 def calculate_indicators(df: pd.DataFrame):
     df = df.copy()
