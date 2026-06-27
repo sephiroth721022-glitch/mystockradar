@@ -98,6 +98,14 @@ TAIWAN_AI_GROUPS = {
             ("3413", "京鼎"), ("6166", "凌華"),
         ],
     },
+    "面板與顯示器": {
+        "description": "面板、顯示器、觸控、背光與車載/工控顯示模組，適合觀察景氣循環、報價變化、AI PC 與車用顯示需求。",
+        "stocks": [
+            ("3481", "群創"), ("2409", "友達"), ("6116", "彩晶"), ("2352", "佳世達"),
+            ("3673", "TPK-KY"), ("6456", "GIS-KY"), ("6176", "瑞儀"), ("6120", "達運"),
+            ("5371", "中光電"), ("3038", "全台"), ("8215", "明基材"), ("4960", "誠美材"),
+        ],
+    },
 }
 
 
@@ -570,6 +578,45 @@ def source_quality(source: str):
     return "中"
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_us_quote(ticker: str):
+    try:
+        hist = yf.download(
+            ticker,
+            period="5d",
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            threads=False,
+            multi_level_index=False,
+        )
+        if hist.empty:
+            hist = yf.Ticker(ticker).history(period="5d", interval="1d", auto_adjust=True)
+        if hist.empty:
+            return {"ticker": ticker, "status": "no_data", "error": "Yahoo Finance 沒有回傳資料"}
+        if isinstance(hist.columns, pd.MultiIndex):
+            hist.columns = hist.columns.get_level_values(0)
+
+        close = float(hist["Close"].dropna().iloc[-1])
+        prev = float(hist["Close"].dropna().iloc[-2]) if len(hist["Close"].dropna()) > 1 else close
+        volume = float(hist["Volume"].dropna().iloc[-1]) if "Volume" in hist and not hist["Volume"].dropna().empty else np.nan
+        change = close - prev
+        change_pct = change / prev * 100 if prev else 0
+
+        return {
+            "ticker": ticker,
+            "status": "ok",
+            "price": close,
+            "change": change,
+            "change_pct": change_pct,
+            "volume": volume,
+            "date": hist.index[-1].strftime("%Y-%m-%d") if hasattr(hist.index[-1], "strftime") else str(hist.index[-1]),
+            "error": "",
+        }
+    except Exception as exc:
+        return {"ticker": ticker, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
 def render_stock_tab():
     st.subheader("台股技術面與題材觀察")
     st.caption("輸入台股代號或名稱，可一次輸入多檔並以逗號分隔。資料來源為 Yahoo Finance，適合做研究起點，不構成投資建議。")
@@ -733,20 +780,45 @@ def render_news_tab():
 def render_watchlist_tab():
     st.subheader("美股輔助觀察清單")
     st.caption("用來輔助判斷台股供應鏈方向，特別是 AI 資本支出、半導體設備與雲端需求。")
+
+    if st.button("重新抓取美股資料", use_container_width=True):
+        fetch_us_quote.clear()
+        st.rerun()
+
     for group, tickers in US_WATCHLIST.items():
         with st.expander(group, expanded=True):
-            cols = st.columns(len(tickers))
-            for i, ticker in enumerate(tickers):
-                try:
-                    data = yf.Ticker(ticker).history(period="5d", interval="1d", auto_adjust=True)
-                    if data.empty:
-                        cols[i].metric(ticker, "N/A")
-                    else:
-                        close = float(data["Close"].iloc[-1])
-                        prev = float(data["Close"].iloc[-2]) if len(data) > 1 else close
-                        cols[i].metric(ticker, f"{close:.2f}", f"{(close - prev) / prev * 100:+.2f}%")
-                except Exception:
-                    cols[i].metric(ticker, "N/A")
+            quotes = [fetch_us_quote(ticker) for ticker in tickers]
+            cols = st.columns(min(len(tickers), 5))
+            for i, quote in enumerate(quotes):
+                col = cols[i % len(cols)]
+                if quote.get("status") == "ok":
+                    col.metric(
+                        quote["ticker"],
+                        f"{quote['price']:.2f}",
+                        f"{quote['change']:+.2f} / {quote['change_pct']:+.2f}%",
+                    )
+                else:
+                    col.metric(quote["ticker"], "N/A")
+
+            table = pd.DataFrame(
+                [
+                    {
+                        "Ticker": q.get("ticker"),
+                        "價格": fmt(q.get("price")),
+                        "漲跌": fmt(q.get("change")),
+                        "漲跌幅": fmt(q.get("change_pct"), 2, "%"),
+                        "成交量": f"{q.get('volume', np.nan):,.0f}" if not pd.isna(q.get("volume", np.nan)) else "N/A",
+                        "日期": q.get("date", "N/A"),
+                        "狀態": "正常" if q.get("status") == "ok" else q.get("error", "抓取失敗"),
+                    }
+                    for q in quotes
+                ]
+            )
+            st.dataframe(table, use_container_width=True, hide_index=True)
+
+            failed = [q for q in quotes if q.get("status") != "ok"]
+            if failed:
+                st.warning("部分美股資料抓取失敗，通常是 Yahoo Finance 暫時限流或該 ticker 回傳空資料。可稍後按「重新抓取美股資料」。")
 
 
 st.title("台美股研究情報站")
