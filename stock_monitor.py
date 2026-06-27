@@ -110,10 +110,48 @@ TAIWAN_AI_GROUPS = {
 
 
 US_WATCHLIST = {
-    "AI 晶片": ["NVDA", "AMD", "AVGO", "MRVL", "ARM"],
+    "人工智慧晶片": ["NVDA", "AMD", "AVGO", "MRVL", "ARM"],
     "雲端與軟體": ["MSFT", "GOOGL", "AMZN", "META", "ORCL", "SNOW"],
     "半導體設備": ["ASML", "AMAT", "LRCX", "KLAC", "TER"],
     "電動車與能源": ["TSLA", "ENPH", "FSLR", "GEV"],
+}
+
+
+US_INDEX_WATCHLIST = {
+    "美股大盤指數": ["^DJI", "^GSPC", "^IXIC", "^SOX", "^RUT"],
+    "風險與利率": ["^VIX", "DX-Y.NYB", "^TNX"],
+}
+
+
+US_NAME_MAP = {
+    "^DJI": "道瓊工業指數",
+    "^GSPC": "標普 500 指數",
+    "^IXIC": "那斯達克指數",
+    "^SOX": "費城半導體指數",
+    "^RUT": "羅素 2000 指數",
+    "^VIX": "波動率指數",
+    "DX-Y.NYB": "美元指數",
+    "^TNX": "美國 10 年期公債殖利率",
+    "NVDA": "輝達",
+    "AMD": "超微",
+    "AVGO": "博通",
+    "MRVL": "邁威爾",
+    "ARM": "安謀",
+    "MSFT": "微軟",
+    "GOOGL": "谷歌",
+    "AMZN": "亞馬遜",
+    "META": "臉書母公司",
+    "ORCL": "甲骨文",
+    "SNOW": "雲端資料平台",
+    "ASML": "艾司摩爾",
+    "AMAT": "應用材料",
+    "LRCX": "科林研發",
+    "KLAC": "科磊",
+    "TER": "泰瑞達",
+    "TSLA": "特斯拉",
+    "ENPH": "恩相能源",
+    "FSLR": "第一太陽能",
+    "GEV": "奇異維諾瓦",
 }
 
 
@@ -765,45 +803,82 @@ def render_news_tab():
             "text/csv",
         )
 
-    st.markdown("### X 與 Reddit 查核入口")
+    st.markdown("### X / Reddit / Google 查核入口")
     social_queries = [
-        ("X FOPLP 台股", "https://x.com/search?q=" + quote_plus("FOPLP 台股 先進封裝")),
+        ("X FOPLP 台股", "https://x.com/search?q=" + quote_plus("FOPLP 台股 先進封裝 OR 扇出型封裝")),
         ("X 矽晶圓", "https://x.com/search?q=" + quote_plus("矽晶圓 環球晶 合晶 台勝科")),
-        ("Reddit semiconductors", "https://www.reddit.com/r/stocks/search/?q=" + quote_plus("advanced packaging semiconductor") + "&restrict_sr=1&t=day"),
-        ("Reddit investing", "https://www.reddit.com/r/investing/search/?q=" + quote_plus("silicon wafer semiconductor cycle") + "&restrict_sr=1&t=day"),
+        ("Reddit 半導體", "https://www.reddit.com/search/?q=" + quote_plus("semiconductor packaging AI chip supply chain") + "&t=week"),
+        ("Reddit 晶圓循環", "https://www.reddit.com/search/?q=" + quote_plus("silicon wafer semiconductor cycle") + "&t=month"),
+        ("Google 查 Reddit", "https://www.google.com/search?q=" + quote_plus("site:reddit.com semiconductor advanced packaging AI chip supply chain")),
     ]
-    cols = st.columns(4)
+    cols = st.columns(len(social_queries))
     for i, (label, url) in enumerate(social_queries):
         cols[i].link_button(label, url, use_container_width=True)
 
 
 def render_watchlist_tab():
-    st.subheader("美股輔助觀察清單")
-    st.caption("用來輔助判斷台股供應鏈方向，特別是 AI 資本支出、半導體設備與雲端需求。")
+    st.subheader("美股大盤與重點個股")
+    st.caption("先看美股大盤、利率、美元與波動率，再用重點個股輔助判斷台股供應鏈方向。")
 
-    if st.button("重新抓取美股資料", use_container_width=True):
+    if st.button("重新抓取美股與指數資料", use_container_width=True):
         fetch_us_quote.clear()
         st.rerun()
 
+    st.markdown("### 大盤指數")
+    for group, tickers in US_INDEX_WATCHLIST.items():
+        with st.expander(group, expanded=True):
+            quotes = [fetch_us_quote(ticker) for ticker in tickers]
+            cols = st.columns(min(len(tickers), 5))
+            for i, quote in enumerate(quotes):
+                col = cols[i % len(cols)]
+                name = US_NAME_MAP.get(quote.get("ticker"), quote.get("ticker"))
+                if quote.get("status") == "ok":
+                    col.metric(
+                        name,
+                        f"{quote['price']:.2f}",
+                        f"{quote['change']:+.2f} / {quote['change_pct']:+.2f}%",
+                    )
+                else:
+                    col.metric(name, "N/A")
+
+            index_table = pd.DataFrame(
+                [
+                    {
+                        "名稱": US_NAME_MAP.get(q.get("ticker"), q.get("ticker")),
+                        "代號": q.get("ticker"),
+                        "最新值": fmt(q.get("price")),
+                        "漲跌": fmt(q.get("change")),
+                        "漲跌幅": fmt(q.get("change_pct"), 2, "%"),
+                        "日期": q.get("date", "N/A"),
+                        "狀態": "正常" if q.get("status") == "ok" else q.get("error", "抓取失敗"),
+                    }
+                    for q in quotes
+                ]
+            )
+            st.dataframe(index_table, use_container_width=True, hide_index=True)
+
+    st.markdown("### 重點個股")
     for group, tickers in US_WATCHLIST.items():
         with st.expander(group, expanded=True):
             quotes = [fetch_us_quote(ticker) for ticker in tickers]
             cols = st.columns(min(len(tickers), 5))
             for i, quote in enumerate(quotes):
                 col = cols[i % len(cols)]
+                name = US_NAME_MAP.get(quote.get("ticker"), quote.get("ticker"))
                 if quote.get("status") == "ok":
                     col.metric(
-                        quote["ticker"],
+                        name,
                         f"{quote['price']:.2f}",
                         f"{quote['change']:+.2f} / {quote['change_pct']:+.2f}%",
                     )
                 else:
-                    col.metric(quote["ticker"], "N/A")
+                    col.metric(name, "N/A")
 
             table = pd.DataFrame(
                 [
                     {
-                        "Ticker": q.get("ticker"),
+                        "名稱": US_NAME_MAP.get(q.get("ticker"), q.get("ticker")),
+                        "代號": q.get("ticker"),
                         "價格": fmt(q.get("price")),
                         "漲跌": fmt(q.get("change")),
                         "漲跌幅": fmt(q.get("change_pct"), 2, "%"),
@@ -818,7 +893,7 @@ def render_watchlist_tab():
 
             failed = [q for q in quotes if q.get("status") != "ok"]
             if failed:
-                st.warning("部分美股資料抓取失敗，通常是 Yahoo Finance 暫時限流或該 ticker 回傳空資料。可稍後按「重新抓取美股資料」。")
+                st.warning("部分資料抓取失敗，通常是 Yahoo Finance 暫時限流或該代號回傳空資料。可稍後按「重新抓取美股與指數資料」。")
 
 
 st.title("台美股研究情報站")
