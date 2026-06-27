@@ -25,6 +25,23 @@ TAIWAN_AI_GROUPS = {
             ("5347", "世界"), ("3450", "聯鈞"), ("6187", "萬潤"), ("6525", "捷敏-KY"),
         ],
     },
+    "FOPLP / 先進封裝": {
+        "description": "Fan-Out Panel Level Packaging、CoWoS、SoIC、RDL、載板與封裝設備，受 AI/HPC 晶片高頻寬與低功耗需求推動。",
+        "stocks": [
+            ("2330", "台積電"), ("3711", "日月光投控"), ("3264", "欣銓"), ("2449", "京元電子"),
+            ("3037", "欣興"), ("8046", "南電"), ("3189", "景碩"), ("3374", "精材"),
+            ("6187", "萬潤"), ("6515", "穎崴"), ("3131", "弘塑"), ("6640", "均華"),
+            ("4770", "上品"), ("6667", "信紘科"), ("3583", "辛耘"), ("8028", "昇陽半導體"),
+        ],
+    },
+    "矽晶圓與材料": {
+        "description": "矽晶圓、再生晶圓、化學材料、特氣與耗材，適合觀察半導體景氣循環與先進製程擴產節奏。",
+        "stocks": [
+            ("6488", "環球晶"), ("6182", "合晶"), ("3532", "台勝科"), ("5483", "中美晶"),
+            ("3016", "嘉晶"), ("8028", "昇陽半導體"), ("4763", "材料-KY"), ("4739", "康普"),
+            ("4721", "美琪瑪"), ("4768", "晶呈科技"), ("1560", "中砂"), ("1723", "中碳"),
+        ],
+    },
     "IC 設計與矽智財": {
         "description": "AI ASIC、邊緣 AI、通訊晶片、IP 與設計服務，是觀察新商機滲透率的前哨。",
         "stocks": [
@@ -83,12 +100,14 @@ TAIWAN_AI_GROUPS = {
     },
 }
 
+
 US_WATCHLIST = {
     "AI 晶片": ["NVDA", "AMD", "AVGO", "MRVL", "ARM"],
     "雲端與軟體": ["MSFT", "GOOGL", "AMZN", "META", "ORCL", "SNOW"],
     "半導體設備": ["ASML", "AMAT", "LRCX", "KLAC", "TER"],
     "電動車與能源": ["TSLA", "ENPH", "FSLR", "GEV"],
 }
+
 
 CHINESE_NAMES = {
     code: name for group in TAIWAN_AI_GROUPS.values() for code, name in group["stocks"]
@@ -124,6 +143,21 @@ class NewsItem:
     query: str
 
 
+def safe_float(value, default=np.nan):
+    try:
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def fmt(value, digits=2, suffix=""):
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{float(value):.{digits}f}{suffix}"
+
+
 def normalize_taiwan_code(code: str) -> str:
     return code.upper().replace(" ", "").replace(".TW", "").replace(".TWO", "")
 
@@ -154,96 +188,293 @@ def fetch_stock_data(code: str, period: str = "1y"):
     return f"{base}.TW", pd.DataFrame(), {}
 
 
+def calculate_adx(data: pd.DataFrame, period: int = 14):
+    high = data["High"]
+    low = data["Low"]
+    close = data["Close"]
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    tr = pd.concat(
+        [(high - low), (high - close.shift()).abs(), (low - close.shift()).abs()],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.rolling(period).mean()
+    plus_di = 100 * plus_dm.rolling(period).mean() / atr.replace(0, np.nan)
+    minus_di = 100 * minus_dm.rolling(period).mean() / atr.replace(0, np.nan)
+    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
+    adx = dx.rolling(period).mean()
+    return atr, plus_di, minus_di, adx
+
+
 def calculate_indicators(df: pd.DataFrame):
     data = df.copy()
-    data["MA20"] = data["Close"].rolling(20).mean()
-    data["SMA50"] = data["Close"].rolling(50).mean()
-    data["SMA200"] = data["Close"].rolling(200).mean()
-    data["STD20"] = data["Close"].rolling(20).std()
+    close = data["Close"]
+    high = data["High"]
+    low = data["Low"]
+    volume = data["Volume"].replace(0, np.nan)
+
+    data["EMA5"] = close.ewm(span=5, adjust=False).mean()
+    data["EMA10"] = close.ewm(span=10, adjust=False).mean()
+    data["MA20"] = close.rolling(20).mean()
+    data["SMA50"] = close.rolling(50).mean()
+    data["SMA60"] = close.rolling(60).mean()
+    data["SMA120"] = close.rolling(120).mean()
+    data["SMA200"] = close.rolling(200).mean()
+
+    data["STD20"] = close.rolling(20).std()
     data["UpperBand"] = data["MA20"] + 2 * data["STD20"]
     data["LowerBand"] = data["MA20"] - 2 * data["STD20"]
+    data["BBWidth"] = (data["UpperBand"] - data["LowerBand"]) / data["MA20"] * 100
+    data["BBPercentB"] = (close - data["LowerBand"]) / (data["UpperBand"] - data["LowerBand"]) * 100
 
-    ema12 = data["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = data["Close"].ewm(span=26, adjust=False).mean()
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
     data["MACD"] = ema12 - ema26
     data["Signal"] = data["MACD"].ewm(span=9, adjust=False).mean()
     data["Hist"] = data["MACD"] - data["Signal"]
 
-    low14 = data["Low"].rolling(14).min()
-    high14 = data["High"].rolling(14).max()
-    data["%K"] = (100 * (data["Close"] - low14) / (high14 - low14)).rolling(3).mean()
+    low14 = low.rolling(14).min()
+    high14 = high.rolling(14).max()
+    data["%K"] = (100 * (close - low14) / (high14 - low14)).rolling(3).mean()
     data["%D"] = data["%K"].rolling(3).mean()
     data["%J"] = 3 * data["%K"] - 2 * data["%D"]
+    data["WilliamsR"] = -100 * (high14 - close) / (high14 - low14)
 
-    delta = data["Close"].diff()
+    delta = close.diff()
     gain = delta.where(delta > 0, 0.0).rolling(14, min_periods=14).mean()
     loss = (-delta.where(delta < 0, 0.0)).rolling(14, min_periods=14).mean()
     rs = gain / loss.replace(0, np.nan)
     data["RSI"] = 100 - (100 / (1 + rs))
-    data["ATR"] = (data["High"] - data["Low"]).rolling(14).mean()
+
+    typical_price = (high + low + close) / 3
+    money_flow = typical_price * volume
+    positive_flow = money_flow.where(typical_price > typical_price.shift(), 0.0)
+    negative_flow = money_flow.where(typical_price < typical_price.shift(), 0.0)
+    mfi_ratio = positive_flow.rolling(14).sum() / negative_flow.rolling(14).sum().replace(0, np.nan)
+    data["MFI"] = 100 - (100 / (1 + mfi_ratio))
+
+    tp_ma = typical_price.rolling(20).mean()
+    mean_dev = (typical_price - tp_ma).abs().rolling(20).mean()
+    data["CCI"] = (typical_price - tp_ma) / (0.015 * mean_dev.replace(0, np.nan))
+
+    atr, plus_di, minus_di, adx = calculate_adx(data)
+    data["ATR"] = atr
+    data["PlusDI"] = plus_di
+    data["MinusDI"] = minus_di
+    data["ADX"] = adx
+
+    data["VolumeMA20"] = volume.rolling(20).mean()
+    data["VolumeRatio"] = data["Volume"] / data["VolumeMA20"]
+    data["OBV"] = (np.sign(close.diff()).fillna(0) * data["Volume"]).cumsum()
+    data["OBV_MA20"] = data["OBV"].rolling(20).mean()
+    data["ROC20"] = close.pct_change(20) * 100
+    data["High52W"] = high.rolling(252, min_periods=30).max()
+    data["Low52W"] = low.rolling(252, min_periods=30).min()
+    data["Resistance20"] = high.rolling(20).max()
+    data["Support20"] = low.rolling(20).min()
 
     latest = data.iloc[-1]
     prev = data.iloc[-2] if len(data) > 1 else latest
-    return {
-        "close": float(latest["Close"]),
-        "MA20": float(latest.get("MA20", np.nan)),
-        "SMA50": float(latest.get("SMA50", np.nan)),
-        "SMA200": float(latest.get("SMA200", np.nan)),
-        "RSI": float(latest.get("RSI", 50) if not pd.isna(latest.get("RSI", np.nan)) else 50),
-        "MACD": float(latest.get("MACD", 0)),
-        "Hist": float(latest.get("Hist", 0)),
-        "Hist_prev": float(prev.get("Hist", 0)),
-        "%K": float(latest.get("%K", 50) if not pd.isna(latest.get("%K", np.nan)) else 50),
-        "%D": float(latest.get("%D", 50) if not pd.isna(latest.get("%D", np.nan)) else 50),
-        "%J": float(latest.get("%J", 50) if not pd.isna(latest.get("%J", np.nan)) else 50),
-        "UpperBand": float(latest.get("UpperBand", np.nan)),
-        "LowerBand": float(latest.get("LowerBand", np.nan)),
-        "ATR": float(latest.get("ATR", 0) if not pd.isna(latest.get("ATR", np.nan)) else 0),
-    }, data
+    values = {
+        "close": safe_float(latest["Close"]),
+        "prev_close": safe_float(prev["Close"]),
+        "EMA5": safe_float(latest["EMA5"]),
+        "EMA10": safe_float(latest["EMA10"]),
+        "MA20": safe_float(latest["MA20"]),
+        "SMA50": safe_float(latest["SMA50"]),
+        "SMA60": safe_float(latest["SMA60"]),
+        "SMA120": safe_float(latest["SMA120"]),
+        "SMA200": safe_float(latest["SMA200"]),
+        "RSI": safe_float(latest["RSI"], 50),
+        "MACD": safe_float(latest["MACD"], 0),
+        "Signal": safe_float(latest["Signal"], 0),
+        "Hist": safe_float(latest["Hist"], 0),
+        "Hist_prev": safe_float(prev["Hist"], 0),
+        "%K": safe_float(latest["%K"], 50),
+        "%D": safe_float(latest["%D"], 50),
+        "%J": safe_float(latest["%J"], 50),
+        "WilliamsR": safe_float(latest["WilliamsR"]),
+        "MFI": safe_float(latest["MFI"]),
+        "CCI": safe_float(latest["CCI"]),
+        "ADX": safe_float(latest["ADX"]),
+        "PlusDI": safe_float(latest["PlusDI"]),
+        "MinusDI": safe_float(latest["MinusDI"]),
+        "ATR": safe_float(latest["ATR"], 0),
+        "UpperBand": safe_float(latest["UpperBand"]),
+        "LowerBand": safe_float(latest["LowerBand"]),
+        "BBWidth": safe_float(latest["BBWidth"]),
+        "BBPercentB": safe_float(latest["BBPercentB"]),
+        "VolumeRatio": safe_float(latest["VolumeRatio"]),
+        "OBV": safe_float(latest["OBV"]),
+        "OBV_MA20": safe_float(latest["OBV_MA20"]),
+        "ROC20": safe_float(latest["ROC20"]),
+        "High52W": safe_float(latest["High52W"]),
+        "Low52W": safe_float(latest["Low52W"]),
+        "Resistance20": safe_float(latest["Resistance20"]),
+        "Support20": safe_float(latest["Support20"]),
+    }
+    return values, data
+
+
+def trend_text(ind: dict):
+    close = ind["close"]
+    ma20 = ind["MA20"]
+    ma50 = ind["SMA50"]
+    ma200 = ind["SMA200"]
+    if close > ma20 > ma50 > ma200:
+        return "強多排列", "價格站上短中長期均線，趨勢結構完整。"
+    if close > ma50 and ma50 > ma200:
+        return "中期偏多", "價格維持在中期均線之上，回檔仍可能被承接。"
+    if close < ma20 < ma50:
+        return "短線偏弱", "價格跌破短期均線，先觀察止跌與量縮。"
+    return "整理觀察", "均線方向尚未一致，較適合等突破或跌破後再判斷。"
 
 
 def score_stock(ind: dict):
     score = 50
     reasons = []
     close = ind["close"]
+
+    if close > ind["MA20"]:
+        score += 6
+        reasons.append("價格站上 20 日均線，短線趨勢偏多。")
+    else:
+        score -= 5
+        reasons.append("價格低於 20 日均線，短線仍需修復。")
+
     if close > ind["SMA50"] > ind["SMA200"]:
-        score += 20
-        reasons.append("價格站上 50 日與 200 日均線，長短期趨勢同步偏多。")
+        score += 18
+        reasons.append("50 日均線高於 200 日均線，中長期趨勢偏多。")
     elif close < ind["SMA50"] < ind["SMA200"]:
-        score -= 18
-        reasons.append("價格跌破主要均線，趨勢防守優先。")
+        score -= 16
+        reasons.append("價格與均線呈空方排列，防守優先。")
+
     if ind["Hist"] > 0:
         score += 10
         reasons.append("MACD 柱體為正，動能仍在多方。")
         if ind["Hist"] > ind["Hist_prev"]:
-            score += 6
+            score += 5
             reasons.append("MACD 柱體擴大，短線動能加速。")
     else:
         score -= 8
         reasons.append("MACD 柱體為負，需觀察動能是否收斂。")
+
     if 40 <= ind["RSI"] <= 65:
         score += 8
         reasons.append("RSI 位於健康區間，尚未明顯過熱。")
     elif ind["RSI"] > 72:
         score -= 10
         reasons.append("RSI 偏高，追價風險上升。")
+    elif ind["RSI"] < 30:
+        score -= 4
+        reasons.append("RSI 低於 30，雖可能超跌，但需確認止跌。")
+
     if ind["%K"] > ind["%D"]:
-        score += 8
-        reasons.append("KD 呈現黃金交叉或多方排列。")
+        score += 6
+        reasons.append("KD 呈多方排列，短線買盤較主動。")
     else:
         score -= 4
-        reasons.append("KD 動能偏弱，短線需等轉強訊號。")
+        reasons.append("KD 偏弱，短線需要轉強訊號。")
+
+    if ind["ADX"] >= 25 and ind["PlusDI"] > ind["MinusDI"]:
+        score += 8
+        reasons.append("ADX 顯示趨勢強度足夠，且 +DI 大於 -DI。")
+    elif ind["ADX"] >= 25 and ind["MinusDI"] > ind["PlusDI"]:
+        score -= 8
+        reasons.append("ADX 顯示趨勢明確，但方向偏空。")
+
+    if ind["VolumeRatio"] >= 1.5 and close > ind["prev_close"]:
+        score += 6
+        reasons.append("上漲伴隨放量，市場參與度提高。")
+    elif ind["VolumeRatio"] >= 1.5 and close < ind["prev_close"]:
+        score -= 6
+        reasons.append("下跌伴隨放量，需留意籌碼鬆動。")
+
+    if ind["MFI"] > 80:
+        score -= 5
+        reasons.append("MFI 偏高，資金流入已熱，短線需防震盪。")
+    elif 45 <= ind["MFI"] <= 75:
+        score += 4
+        reasons.append("MFI 位於偏健康區間，量價資金未明顯失衡。")
 
     score = max(0, min(100, score))
-    if score >= 78:
+    if score >= 80:
         label, action = "強勢偏多", "可列入核心觀察，等待量價確認後分批布局。"
-    elif score >= 62:
+    elif score >= 65:
         label, action = "偏多觀察", "適合逢回觀察，避免急漲後追高。"
-    elif score >= 45:
-        label, action = "區間整理", "以支撐壓力與消息面催化作為操作依據。"
+    elif score >= 50:
+        label, action = "中性整理", "以支撐壓力、量能與消息面催化作為操作依據。"
+    elif score >= 35:
+        label, action = "偏弱防守", "先控制部位，等待均線與動能修復。"
     else:
-        label, action = "偏弱防守", "先控管風險，等待均線與動能修復。"
+        label, action = "弱勢迴避", "技術面風險較高，除非基本面有強催化，否則不宜急著承接。"
     return score, label, action, reasons
+
+
+def indicator_rows(ind: dict):
+    close = ind["close"]
+    rows = []
+
+    trend_label, trend_note = trend_text(ind)
+    rows.append(["均線趨勢", trend_label, "判斷價格相對短中長期平均成本的位置。", trend_note])
+
+    macd_state = "多方動能" if ind["Hist"] > 0 else "空方動能"
+    if ind["Hist"] > ind["Hist_prev"]:
+        macd_state += "、柱體擴大"
+    else:
+        macd_state += "、柱體收斂"
+    rows.append(["MACD", macd_state, "衡量中短期趨勢動能，柱體擴大代表動能增強。", f"MACD {fmt(ind['MACD'])}，柱體 {fmt(ind['Hist'])}。"])
+
+    if ind["RSI"] >= 70:
+        rsi_state = "過熱"
+    elif ind["RSI"] <= 30:
+        rsi_state = "超跌"
+    elif ind["RSI"] >= 50:
+        rsi_state = "偏強"
+    else:
+        rsi_state = "偏弱"
+    rows.append(["RSI", rsi_state, "衡量漲跌速度，常用 70/30 作為過熱與超跌參考。", f"目前 RSI {fmt(ind['RSI'], 1)}。"])
+
+    kd_state = "黃金交叉或多方排列" if ind["%K"] > ind["%D"] else "死亡交叉或空方排列"
+    rows.append(["KD / J", kd_state, "反映短線位置與轉折，J 值高低可輔助判斷過熱或超跌。", f"K {fmt(ind['%K'], 1)} / D {fmt(ind['%D'], 1)} / J {fmt(ind['%J'], 1)}。"])
+
+    if ind["ADX"] >= 25:
+        adx_state = "趨勢明確，方向偏多" if ind["PlusDI"] > ind["MinusDI"] else "趨勢明確，方向偏空"
+    else:
+        adx_state = "趨勢不明顯"
+    rows.append(["ADX / DI", adx_state, "ADX 看趨勢強度，+DI 與 -DI 看多空方向。", f"ADX {fmt(ind['ADX'], 1)}，+DI {fmt(ind['PlusDI'], 1)}，-DI {fmt(ind['MinusDI'], 1)}。"])
+
+    bb_state = "接近上緣" if ind["BBPercentB"] >= 85 else "接近下緣" if ind["BBPercentB"] <= 15 else "位於區間中段"
+    rows.append(["布林通道", bb_state, "觀察價格相對波動區間的位置，通道變窄後突破常有方向訊號。", f"%B {fmt(ind['BBPercentB'], 1)}，寬度 {fmt(ind['BBWidth'], 1, '%')}。"])
+
+    volume_state = "放量" if ind["VolumeRatio"] >= 1.5 else "量能普通" if ind["VolumeRatio"] >= 0.8 else "量縮"
+    rows.append(["量能比", volume_state, "今日成交量相對 20 日均量，判斷突破或跌破是否有市場參與。", f"量能為 20 日均量的 {fmt(ind['VolumeRatio'], 2)} 倍。"])
+
+    obv_state = "OBV 高於均線，籌碼偏累積" if ind["OBV"] > ind["OBV_MA20"] else "OBV 低於均線，籌碼偏保守"
+    rows.append(["OBV", obv_state, "用漲跌日成交量累計觀察資金是否持續流入。", f"目前 {obv_state}。"])
+
+    mfi_state = "資金過熱" if ind["MFI"] >= 80 else "資金偏弱" if ind["MFI"] <= 20 else "資金正常"
+    rows.append(["MFI", mfi_state, "把價格與成交量一起納入的 RSI，能補足單看價格的盲點。", f"MFI {fmt(ind['MFI'], 1)}。"])
+
+    cci_state = "強勢突破區" if ind["CCI"] >= 100 else "弱勢跌破區" if ind["CCI"] <= -100 else "常態區間"
+    rows.append(["CCI", cci_state, "衡量價格偏離統計均值的程度，適合觀察順勢突破與反轉。", f"CCI {fmt(ind['CCI'], 1)}。"])
+
+    wr_state = "短線過熱" if ind["WilliamsR"] >= -20 else "短線超跌" if ind["WilliamsR"] <= -80 else "短線中性"
+    rows.append(["Williams %R", wr_state, "衡量收盤價在近 14 日高低區間的位置，越接近 0 越強。", f"W%R {fmt(ind['WilliamsR'], 1)}。"])
+
+    roc_state = "20 日報酬為正" if ind["ROC20"] > 0 else "20 日報酬為負"
+    rows.append(["ROC20", roc_state, "觀察近 20 個交易日價格變化率，適合看中短線動能延續性。", f"20 日變化 {fmt(ind['ROC20'], 2, '%')}。"])
+
+    atr_pct = ind["ATR"] / close * 100 if close and not pd.isna(ind["ATR"]) else np.nan
+    rows.append(["ATR", "波動參考", "衡量平均日內波動，可用於停損距離與部位控管。", f"ATR {fmt(ind['ATR'])}，約為股價 {fmt(atr_pct, 2, '%')}。"])
+
+    high_gap = (ind["High52W"] - close) / close * 100 if close and not pd.isna(ind["High52W"]) else np.nan
+    low_gap = (close - ind["Low52W"]) / ind["Low52W"] * 100 if ind["Low52W"] and not pd.isna(ind["Low52W"]) else np.nan
+    rows.append(["52 週位置", "長線位置", "判斷股價距離一年高低點的位置，避免在擁擠高位無腦追價。", f"距 52 週高點 {fmt(high_gap, 1, '%')}，距低點 {fmt(low_gap, 1, '%')}。"])
+
+    return pd.DataFrame(rows, columns=["指標", "目前狀態", "代表什麼", "目前解讀"])
 
 
 def parse_date(value: str | None):
@@ -307,6 +538,8 @@ def collect_news(hours: int, per_query: int):
         ],
         "產業與個股動態": [
             "台股 AI 伺服器 GB200 ASIC CPO 液冷 PCB",
+            "FOPLP 先進封裝 扇出型面板級封裝 台股",
+            "矽晶圓 環球晶 合晶 台勝科 中美晶 半導體材料",
             "台積電 輝達 AMD Broadcom 供應鏈 台股",
             "記憶體 HBM NAND DRAM 台股 美光 三星 SK海力士",
             "機器人 電動車 電力設備 儲能 台股 美股",
@@ -341,7 +574,7 @@ def render_stock_tab():
     st.subheader("台股技術面與題材觀察")
     st.caption("輸入台股代號或名稱，可一次輸入多檔並以逗號分隔。資料來源為 Yahoo Finance，適合做研究起點，不構成投資建議。")
 
-    with st.expander("AI 供應鏈分類觀察", expanded=True):
+    with st.expander("產業分類觀察", expanded=True):
         for group_name, group_data in TAIWAN_AI_GROUPS.items():
             st.markdown(f"**{group_name}**")
             st.caption(group_data["description"])
@@ -351,9 +584,9 @@ def render_stock_tab():
                     st.session_state["codes_input"] = code
                     st.rerun()
 
-    default_codes = st.session_state.get("codes_input", "2330, 2382, 3661")
+    default_codes = st.session_state.get("codes_input", "2330, 3711, 6488, 6182")
     codes_input = st.text_input("股票代號或名稱", value=default_codes, key="codes_input")
-    period = st.selectbox("資料區間", ["6mo", "1y", "2y", "5y"], index=1)
+    period = st.selectbox("資料區間", ["6mo", "1y", "2y", "5y"], index=2)
 
     if st.button("開始分析", type="primary", use_container_width=True):
         items = [x.strip() for x in codes_input.split(",") if x.strip()]
@@ -364,38 +597,57 @@ def render_stock_tab():
                 if hist.empty:
                     st.error(f"{code} 找不到足夠資料。")
                     continue
+
                 ind, hist = calculate_indicators(hist)
                 score, label, action, reasons = score_stock(ind)
                 name = CHINESE_NAMES.get(normalize_taiwan_code(code), info.get("shortName", code))
+                close = ind["close"]
+                change_pct = (close - ind["prev_close"]) / ind["prev_close"] * 100 if ind["prev_close"] else 0
 
                 with st.expander(f"{name} ({symbol}) | 研究分數 {score}/100 | {label}", expanded=True):
-                    c1, c2, c3, c4 = st.columns(4)
-                    prev_close = float(hist["Close"].iloc[-2]) if len(hist) > 1 else ind["close"]
-                    change_pct = (ind["close"] - prev_close) / prev_close * 100 if prev_close else 0
-                    c1.metric("收盤價", f"{ind['close']:.2f}", f"{change_pct:+.2f}%")
-                    c2.metric("RSI", f"{ind['RSI']:.1f}")
-                    c3.metric("MACD 柱體", f"{ind['Hist']:.2f}")
-                    c4.metric("KD", f"K {ind['%K']:.1f} / D {ind['%D']:.1f}")
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("收盤價", fmt(close), f"{change_pct:+.2f}%")
+                    c2.metric("RSI", fmt(ind["RSI"], 1))
+                    c3.metric("MACD 柱體", fmt(ind["Hist"]))
+                    c4.metric("ADX", fmt(ind["ADX"], 1))
+                    c5.metric("量能比", f"{fmt(ind['VolumeRatio'], 2)}x")
 
-                    st.line_chart(hist[["Close", "MA20", "SMA50"]].dropna())
+                    chart_cols = ["Close", "EMA5", "EMA10", "MA20", "SMA50", "SMA120"]
+                    st.line_chart(hist[chart_cols].dropna(how="all"))
+
                     st.markdown(f"**操作觀點：** {action}")
                     for reason in reasons:
                         st.write(f"- {reason}")
 
                     atr = ind["ATR"]
-                    buy_low = ind["MA20"] * 0.97 if not np.isnan(ind["MA20"]) else ind["close"] * 0.97
-                    buy_high = ind["MA20"] * 1.03 if not np.isnan(ind["MA20"]) else ind["close"] * 1.03
-                    stop_loss = ind["close"] - atr * 1.5 if atr else ind["close"] * 0.92
-                    target = ind["close"] + atr * 3 if atr else ind["close"] * 1.15
+                    buy_low = ind["MA20"] * 0.97 if not pd.isna(ind["MA20"]) else close * 0.97
+                    buy_high = ind["MA20"] * 1.03 if not pd.isna(ind["MA20"]) else close * 1.03
+                    stop_loss = close - atr * 1.5 if atr else close * 0.92
+                    target = close + atr * 3 if atr else close * 1.15
                     st.markdown(
                         f"**交易框架：** 觀察區間 {buy_low:.1f} 至 {buy_high:.1f}，"
                         f"停損參考 {stop_loss:.1f}，第一目標 {target:.1f}。"
                     )
 
+                    st.markdown("### 技術指標完整解讀")
+                    st.dataframe(indicator_rows(ind), use_container_width=True, hide_index=True)
+
+                    with st.expander("支撐壓力與風險控管"):
+                        s1, s2, s3, s4 = st.columns(4)
+                        s1.metric("20 日支撐", fmt(ind["Support20"]))
+                        s2.metric("20 日壓力", fmt(ind["Resistance20"]))
+                        s3.metric("布林上緣", fmt(ind["UpperBand"]))
+                        s4.metric("布林下緣", fmt(ind["LowerBand"]))
+                        st.write(
+                            "ATR 可用來估算波動停損。短線交易可避免把停損放得太近；波段交易則要搭配均線、支撐與基本面催化。"
+                        )
+
                     with st.expander("基本面摘要"):
                         cols = st.columns(4)
-                        cols[0].metric("本益比", f"{info.get('trailingPE') or info.get('forwardPE') or 'N/A'}")
-                        cols[1].metric("EPS", f"{info.get('trailingEps') or 'N/A'}")
+                        pe = info.get("trailingPE") or info.get("forwardPE")
+                        cols[0].metric("本益比", fmt(pe, 1) if pe else "N/A")
+                        eps = info.get("trailingEps")
+                        cols[1].metric("EPS", fmt(eps, 2) if eps else "N/A")
                         dividend = info.get("dividendYield")
                         cols[2].metric("殖利率", f"{dividend * 100:.2f}%" if dividend else "N/A")
                         cols[3].metric("產業", info.get("industry", "N/A"))
@@ -455,7 +707,7 @@ def render_news_tab():
             """
 - **所有動態總結：** 先把新聞分成政策、資金、需求、供給、財報與估值六條線，避免只看單一熱門標題。
 - **未來一周大事：** 關注美國通膨與就業數據、Fed 官員談話、台灣出口與電子供應鏈月營收、重量級科技股法說、地緣政治制裁或關稅更新。
-- **潛力產業：** AI 伺服器次供應鏈、CPO/光通訊、液冷散熱、高階 PCB/載板、HBM 與記憶體、電力設備、機器人與工業電腦。
+- **潛力產業：** AI 伺服器次供應鏈、FOPLP/先進封裝、CPO/光通訊、液冷散熱、高階 PCB/載板、矽晶圓、HBM 與記憶體、電力設備。
 - **個股挖掘原則：** 優先找「訂單能見度變長、報價上修、產能瓶頸解除、客戶結構升級、技術面剛轉強」的中型供應鏈，而不是只追已經擁擠的大型權值股。
             """
         )
@@ -468,10 +720,10 @@ def render_news_tab():
 
     st.markdown("### X 與 Reddit 查核入口")
     social_queries = [
-        ("X 台股 AI 伺服器", "https://x.com/search?q=" + quote_plus("台股 AI 伺服器 since:2026-06-27")),
-        ("X Nvidia supply chain", "https://x.com/search?q=" + quote_plus("Nvidia supply chain AI server")),
-        ("Reddit stocks", "https://www.reddit.com/r/stocks/search/?q=" + quote_plus("AI semiconductor Taiwan") + "&restrict_sr=1&t=day"),
-        ("Reddit investing", "https://www.reddit.com/r/investing/search/?q=" + quote_plus("semiconductor AI capex") + "&restrict_sr=1&t=day"),
+        ("X FOPLP 台股", "https://x.com/search?q=" + quote_plus("FOPLP 台股 先進封裝")),
+        ("X 矽晶圓", "https://x.com/search?q=" + quote_plus("矽晶圓 環球晶 合晶 台勝科")),
+        ("Reddit semiconductors", "https://www.reddit.com/r/stocks/search/?q=" + quote_plus("advanced packaging semiconductor") + "&restrict_sr=1&t=day"),
+        ("Reddit investing", "https://www.reddit.com/r/investing/search/?q=" + quote_plus("silicon wafer semiconductor cycle") + "&restrict_sr=1&t=day"),
     ]
     cols = st.columns(4)
     for i, (label, url) in enumerate(social_queries):
