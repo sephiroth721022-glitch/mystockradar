@@ -1,3 +1,4 @@
+import ast
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -11,6 +12,13 @@ import pandas as pd
 import requests
 import streamlit as st
 import yfinance as yf
+
+
+MONEYDJ_BASE_URL = "https://concords.moneydj.com"
+MONEYDJ_EXPERT_URL = f"{MONEYDJ_BASE_URL}/z/zk/zk00-f.htm"
+MONEYDJ_CONDITION_JS_URL = f"{MONEYDJ_BASE_URL}/z/zk/js/zkswc2js.djjs"
+MONEYDJ_PICK_ID_JS_URL = f"{MONEYDJ_BASE_URL}/z/zk/js/zkswc2pickidjs.djjs"
+MONEYDJ_RANGE_JS_URL = f"{MONEYDJ_BASE_URL}/z/zk/js/zkswc2rangejs.djjs"
 
 
 st.set_page_config(page_title="台美股研究情報站", page_icon="📈", layout="wide")
@@ -616,6 +624,93 @@ def source_quality(source: str):
     return "中"
 
 
+def parse_js_array(text: str, var_name: str):
+    match = re.search(r"var\s+" + re.escape(var_name) + r"\s*=\s*new Array\((.*?)\);", text, re.S)
+    if not match:
+        return []
+    return ast.literal_eval("[" + match.group(1) + "]")
+
+
+def placeholder_count(description: str):
+    nums = [int(x) for x in re.findall(r"\$(\d+)", description or "")]
+    return max(nums) if nums else 0
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_moneydj_conditions():
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        condition_res = requests.get(
+            MONEYDJ_CONDITION_JS_URL,
+            timeout=20,
+            verify=False,
+            headers=headers,
+        )
+        pick_res = requests.get(
+            MONEYDJ_PICK_ID_JS_URL,
+            timeout=20,
+            verify=False,
+            headers=headers,
+        )
+        range_res = requests.get(
+            MONEYDJ_RANGE_JS_URL,
+            timeout=20,
+            verify=False,
+            headers=headers,
+        )
+        condition_res.raise_for_status()
+        pick_res.raise_for_status()
+        range_res.raise_for_status()
+
+        condition_text = condition_res.content.decode("big5", errors="replace")
+        pick_text = pick_res.content.decode("big5", errors="replace")
+        range_text = range_res.content.decode("big5", errors="replace")
+
+        ids = parse_js_array(condition_text, "swc2ID")
+        descriptions = parse_js_array(condition_text, "swc2pick")
+        ranges = parse_js_array(range_text, "zkSwc2Range")
+
+        id_map = {}
+        for index, condition_id in enumerate(ids):
+            if not condition_id:
+                continue
+            id_map[condition_id] = {
+                "條件代號": condition_id,
+                "條件描述": descriptions[index] if index < len(descriptions) else "",
+                "允許範圍": ranges[index] if index < len(ranges) else "",
+            }
+
+        category_names = {
+            "swc2pickId1": "市場面",
+            "swc2pickId2": "基本面",
+            "swc2pickId3": "技術面",
+            "swc2pickId4": "籌碼面",
+            "swc2pickId5": "財務面",
+            "swc2pickId6": "營收獲利面",
+        }
+
+        rows = []
+        for var_name, category in category_names.items():
+            for condition_id in parse_js_array(pick_text, var_name):
+                item = id_map.get(condition_id)
+                if not item:
+                    continue
+                description = item["條件描述"]
+                rows.append(
+                    {
+                        "分類": category,
+                        "條件代號": item["條件代號"],
+                        "條件描述": description,
+                        "參數數量": placeholder_count(description),
+                        "允許範圍": item["允許範圍"] or "無參數",
+                    }
+                )
+
+        return pd.DataFrame(rows), ""
+    except Exception as exc:
+        return pd.DataFrame(), f"{type(exc).__name__}: {exc}"
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_us_quote(ticker: str):
     try:
@@ -896,16 +991,71 @@ def render_watchlist_tab():
                 st.warning("部分資料抓取失敗，通常是 Yahoo Finance 暫時限流或該代號回傳空資料。可稍後按「重新抓取美股與指數資料」。")
 
 
+def render_moneydj_tab():
+    st.subheader("MoneyDJ 選股大師條件庫")
+    st.caption("解析 MoneyDJ 選股大師的條件分類與條件描述。這裡先整合條件瀏覽與搜尋，方便你把 MoneyDJ 的選股邏輯納入自己的研究流程。")
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    if c1.button("重新讀取 MoneyDJ 條件", use_container_width=True):
+        fetch_moneydj_conditions.clear()
+        st.rerun()
+    c2.link_button("開啟原始網站", MONEYDJ_EXPERT_URL, use_container_width=True)
+    c3.info("原站是 Big5 編碼與 frameset 老頁面，APP 會以單站憑證例外讀取 JS 條件庫。")
+
+    with st.spinner("讀取 MoneyDJ 選股條件中..."):
+        df, error = fetch_moneydj_conditions()
+
+    if error:
+        st.error(f"MoneyDJ 條件讀取失敗：{error}")
+        st.write("可能原因：MoneyDJ 暫時阻擋、網路不穩、或網站結構改版。")
+        return
+    if df.empty:
+        st.warning("目前沒有解析到 MoneyDJ 條件。")
+        return
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("條件總數", f"{len(df):,}")
+    m2.metric("分類數", df["分類"].nunique())
+    m3.metric("來源", "MoneyDJ 選股大師")
+
+    categories = df["分類"].drop_duplicates().tolist()
+    selected_categories = st.multiselect("分類篩選", categories, default=categories)
+    keyword = st.text_input("關鍵字搜尋", placeholder="例如：RSI、KD、外資、營收、新高、本益比")
+
+    filtered = df[df["分類"].isin(selected_categories)] if selected_categories else df.copy()
+    if keyword.strip():
+        key = keyword.strip()
+        filtered = filtered[
+            filtered["條件描述"].str.contains(key, case=False, na=False)
+            | filtered["條件代號"].str.contains(key, case=False, na=False)
+            | filtered["分類"].str.contains(key, case=False, na=False)
+        ]
+
+    st.dataframe(filtered, use_container_width=True, hide_index=True)
+
+    st.markdown("### 可以整合到 APP 的程度")
+    st.markdown(
+        """
+- **已完成：** 條件庫解析、六大分類、關鍵字搜尋、參數範圍顯示、原站連結。
+- **下一步可做：** 把你常用的 MoneyDJ 條件做成「一鍵策略模板」，例如營收成長、外資買超、技術轉強、創高突破。
+- **再下一步可做：** 研究 MoneyDJ hidden form 送出格式，嘗試直接在 APP 內送出條件並抓回選股結果。
+- **風險限制：** MoneyDJ 原站是老式 frameset + JavaScript + Big5 編碼，且 HTTPS 憑證對 Python 驗證不友善；若網站改版，解析器需要更新。
+        """
+    )
+
+
 st.title("台美股研究情報站")
 st.caption("結合台股供應鏈觀察、技術面評分、24 小時新聞情報與美股輔助監控。")
 
-tab_stock, tab_news, tab_us = st.tabs(["台股分析", "24 小時情報", "美股輔助"])
+tab_stock, tab_news, tab_us, tab_moneydj = st.tabs(["台股分析", "24 小時情報", "美股輔助", "MoneyDJ 選股"])
 with tab_stock:
     render_stock_tab()
 with tab_news:
     render_news_tab()
 with tab_us:
     render_watchlist_tab()
+with tab_moneydj:
+    render_moneydj_tab()
 
 st.markdown("---")
 st.caption("資料僅供研究與教育用途，不構成投資建議。新聞需回到原文、公司公告與交易數據交叉驗證。")
